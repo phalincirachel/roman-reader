@@ -100,6 +100,7 @@ export function githubQuelle({ apiBase, test = false }) {
     bekannteKoepfe: new Set(),
     modell: null,
     zkn3Sha: null,
+    zkn3Stand: null, // wann die zkn3 zuletzt auf GitHub kam: { datum, nachricht }
     rueckmeldung: {},
     rueckmeldungSha: null,
     material: [],
@@ -219,6 +220,13 @@ export function githubQuelle({ apiBase, test = false }) {
     if (zkn3Sha !== s.zkn3Sha || !s.modell) {
       s.modell = await leseZkn3(await blob(zkn3Sha), zkn3[0]);
       s.zkn3Sha = zkn3Sha;
+      // Stand des Romans = letzter Commit, der die zkn3 geändert hat (nicht etwa eine Änderung am Programm)
+      try {
+        const [last] = await gh(`/repos/${repo()}/commits?path=${encodeURIComponent(zkn3[0])}&sha=${kopf.sha}&per_page=1`);
+        s.zkn3Stand = { datum: last?.commit?.committer?.date || kopf.datum, nachricht: last?.commit?.message || kopf.nachricht };
+      } catch {
+        s.zkn3Stand = { datum: kopf.datum, nachricht: kopf.nachricht };
+      }
     }
     const rueckSha = files.get(RUECKMELDUNG) || null;
     if (rueckSha !== s.rueckmeldungSha) {
@@ -333,7 +341,7 @@ export function githubQuelle({ apiBase, test = false }) {
       ok: !s.zugangFehler, error: s.zugangFehler?.message || s.fehler, github: true,
       changeCount: s.lokal.length, ahead: 0,
       changes: s.lokal.map((e) => ({ path: e.titel || `Zettel ${e.zettel}` })),
-      lastCommit: s.kopf ? { time: lokaleZeit(s.kopf.datum), subject: s.kopf.nachricht } : null,
+      lastCommit: s.zkn3Stand ? { time: lokaleZeit(s.zkn3Stand.datum), subject: s.zkn3Stand.nachricht } : null,
     };
   }
 
@@ -513,7 +521,7 @@ export function githubQuelle({ apiBase, test = false }) {
     async buch() {
       await laden();
       const payload = s.modell.bookPayload(overlay());
-      payload.file.modified = lokaleZeit(s.kopf.datum);
+      payload.file.modified = lokaleZeit(s.zkn3Stand?.datum);
       payload.stand = stand();
       return payload;
     },
@@ -588,7 +596,7 @@ export function githubQuelle({ apiBase, test = false }) {
         hochladen: s.lokal.filter((e) => e.fertig && !strittig.has(e.id)),
         programm: false,
         fehler: s.fehler,
-        stand: { datum: lokaleZeit(s.kopf?.datum), nachricht: s.kopf?.nachricht || "" },
+        stand: { datum: lokaleZeit(s.zkn3Stand?.datum), nachricht: s.zkn3Stand?.nachricht || "" },
       };
     },
 
@@ -612,7 +620,7 @@ export function githubQuelle({ apiBase, test = false }) {
     async status() {
       await laden();
       await nacheinander(nachsehen);
-      return { stand: stand(), modified: lokaleZeit(s.kopf?.datum), error: null, git: gitZustand(), bearbeitung: zaehle() };
+      return { stand: stand(), modified: lokaleZeit(s.zkn3Stand?.datum), error: null, git: gitZustand(), bearbeitung: zaehle() };
     },
   };
 }
