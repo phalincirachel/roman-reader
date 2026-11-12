@@ -490,22 +490,90 @@ function showWhole(id, { offset = null } = {}) {
   const target = entryById(id) && isVisible(entryById(id)) ? id : entries[0]?.id;
   state.view = { mode: "gesamt", id: target };
   state.currentWhole = null;
-  scrollToChapter(target, false);
-  if (offset) {
-    const container = state.chapters.find((c) => c.dataset.zettel === String(target));
-    if (container) window.scrollBy(0, container.getBoundingClientRect().top - (readingLine() - offset));
+  const container = state.chapters.find((c) => c.dataset.zettel === String(target));
+  if (container && offset) {
+    // gemerkte Lesestelle: so weit im Kapitel, wie zuletzt gelesen
+    const goal = () => readingLine() - offset;
+    window.scrollBy(0, container.getBoundingClientRect().top - goal());
+    settleOn(container, goal);
+  } else {
+    scrollToChapter(target, false);
   }
   trackWhole();
 }
 
+const chapterGoal = () => readingTop() + 12; // Kapitelanfang knapp unter der Kopfleiste
+
 function scrollToChapter(id, smooth) {
   const container = state.chapters.find((c) => c.dataset.zettel === String(id));
   if (!container) return;
-  const top = container.getBoundingClientRect().top + window.scrollY - readingTop() - 12;
+  const top = container.getBoundingClientRect().top + window.scrollY - chapterGoal();
   const far = Math.abs(container.getBoundingClientRect().top) > window.innerHeight * 3;
-  window.scrollTo({ top, behavior: smooth && !far ? "smooth" : "auto" });
-  if (!smooth || far) trackWhole();
+  if (smooth && !far) {
+    stopSettling();
+    const run = settleRun;
+    window.scrollTo({ top, behavior: "smooth" });
+    afterSmoothScroll(() => { if (run === settleRun) settleOn(container, chapterGoal); }); // nicht, wenn inzwischen selbst gescrollt
+  } else {
+    window.scrollTo({ top, behavior: "auto" });
+    trackWhole();
+    settleOn(container, chapterGoal);
+  }
 }
+
+// In der Gesamtansicht haben Kapitel außerhalb des Bildes nur eine geschätzte Höhe. Nach einem
+// Sprung setzt der Browser die Nachbarn des Ziels wirklich – ist eins davon länger oder kürzer
+// als geschätzt, verrutscht das Ziel. Darum wird die Stelle danach nachgeführt, bis sie steht.
+// Scrollt man selbst, hört das sofort auf.
+let settleRun = 0;
+function stopSettling() {
+  settleRun += 1;
+}
+
+function settleOn(container, goal) {
+  const run = ++settleRun;
+  let quiet = 0;
+  let frames = 0;
+  const step = () => {
+    if (run !== settleRun || !container.isConnected || state.view?.mode !== "gesamt") return;
+    const delta = Math.round(container.getBoundingClientRect().top - goal());
+    if (Math.abs(delta) > 1) {
+      window.scrollBy(0, delta);
+      quiet = 0;
+    } else {
+      quiet += 1;
+    }
+    frames += 1;
+    if (quiet < 4 && frames < 60) requestAnimationFrame(step);
+    else trackWhole();
+  };
+  requestAnimationFrame(step);
+}
+
+function afterSmoothScroll(fn) {
+  let done = false;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    window.removeEventListener("scrollend", finish);
+    fn();
+  };
+  window.addEventListener("scrollend", finish);
+  setTimeout(finish, 1500); // Browser ohne „scrollend“
+}
+
+for (const type of ["wheel", "touchstart", "mousedown"]) window.addEventListener(type, stopSettling, { passive: true });
+window.addEventListener("keydown", (event) => {
+  if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) stopSettling();
+});
+
+// Auch ein Klick auf das gerade markierte Kapitel springt an seinen Anfang (die Adresse ändert sich dabei nicht)
+mini.addEventListener("click", (event) => {
+  const link = event.target.closest("a[data-id]");
+  if (!link) return;
+  event.preventDefault();
+  go(`gesamt/${link.dataset.id}`);
+});
 
 function buildMiniToc(entries) {
   const parts = [];
