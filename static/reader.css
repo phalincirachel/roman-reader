@@ -66,6 +66,9 @@ a{color:var(--accent)}
 .btn:hover{border-color:var(--accent)}
 .btn.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
 .btn:disabled{opacity:.6;cursor:progress}
+/* Ist alles auf GitHub? ruhig = ja, auffällig = nein */
+#btn-sichern.oben{background:var(--ins-bg);color:var(--ins-ink);border-color:var(--ins-line)}
+#btn-sichern.unten{background:var(--custom-bg);color:var(--custom-ink);border-color:var(--custom-ink);font-weight:600}
 .legend{width:100%;display:flex;flex-wrap:wrap;gap:.3rem .8rem;font-size:.78rem;color:var(--muted)}
 
 /* Inhalt */

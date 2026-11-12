@@ -1768,13 +1768,24 @@ $("#speicherstand").addEventListener("click", (event) => {
   openProblems();
 });
 
+// Der Knopf zeigt auf beiden Geräten, ob alles auf GitHub ist: „Auf GitHub ✓“ (ruhig) oder
+// „Noch nicht auf GitHub“ (auffällig) – ein Klick darauf lädt dann sofort hoch.
+const KNOPF = { oben: "Auf GitHub ✓", unten: "Noch nicht auf GitHub", laedt: "Lädt hoch …" };
+
+function knopfZeigen(button, art) {
+  button.textContent = KNOPF[art];
+  button.classList.remove("primary");
+  button.classList.toggle("oben", art === "oben");
+  button.classList.toggle("unten", art !== "oben");
+}
+
 function updateGit(git) {
   state.git = git;
   const button = $("#btn-sichern");
   if (!git) return;
   const saved = git.ok && !git.changeCount && !git.ahead;
-  // „Gesichert“ nur, wenn wirklich alles auf GitHub ist
-  button.textContent = saved ? "Gesichert" : "Sichern";
+  // „Auf GitHub ✓“ nur, wenn wirklich alles auf GitHub ist
+  if (!button.disabled) knopfZeigen(button, saved ? "oben" : "unten");
   if (!git.ok) {
     button.title = `Git meldet ein Problem: ${git.error}`;
     return;
@@ -1786,7 +1797,7 @@ function updateGit(git) {
     button.title = `${git.github ? "Alle Änderungen von hier sind auf GitHub." : "Alles ist auf GitHub gesichert."}${last}`;
   } else {
     const files = git.changes.slice(0, 12).map((c) => `• ${c.path}`).join("\n");
-    const auto = git.github ? "" : `\n\n${git.auto || "Wird automatisch hochgeladen, wenn du den Reader schließt, sonst spätestens nach zwei Stunden."} Ein Klick lädt sofort hoch.`;
+    const auto = git.github ? "\n\nEin Klick lädt sofort hoch." : `\n\n${git.auto || "Lädt von selbst hoch, kurz nachdem du etwas geändert hast."} Ein Klick lädt sofort hoch.`;
     button.title = `Noch nicht auf GitHub:\n${files}${git.changeCount > 12 ? `\n… und ${git.changeCount - 12} weitere` : ""}${git.ahead ? `\n${git.ahead} Sicherung(en) noch nicht hochgeladen` : ""}${last}${auto}`;
   }
 }
@@ -1798,8 +1809,10 @@ async function sichern() {
     return;
   }
   button.disabled = true;
-  button.textContent = "Sichere …";
+  knopfZeigen(button, "laedt");
   try {
+    // Was eben noch im Feld stand (der Klick hat die Eingabe beendet), erst fertig speichern
+    await Promise.all($$("#doc .ed").map((ed) => ed._kette).filter(Boolean));
     const result = await quelle.sichern();
     toast(result.message, result.detail || result.committed || "", result.ok ? 4500 : 10000);
     if (result.git) state.git = result.git;
