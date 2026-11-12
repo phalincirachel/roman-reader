@@ -115,6 +115,13 @@ a{color:var(--accent)}
 .speicherstand.wartet,.speicherstand.offen{color:var(--custom-ink);font-weight:600}
 .speicherstand.problem{color:var(--del-ink);font-weight:600}
 .speicherstand a{color:inherit}
+/* Noch nicht gespeichert: unübersehbar, bis es gespeichert ist */
+.ungesichert{font-weight:700;color:var(--del-ink)}
+.ungesichert a{color:inherit}
+.md-blk.nicht-gespeichert,.md-blk.konflikt{outline:2px solid var(--del-ink)}
+.blk.feld.konflikt:focus-within > .blk-tools,.blk.titel.konflikt > .blk-tools{opacity:1;pointer-events:auto}
+.blk.konflikt .zustand{color:var(--del-ink);font-weight:600}
+.rettung-text{white-space:pre-wrap;font-family:var(--serif);font-size:.9rem;max-height:40vh;overflow:auto;background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:.5rem .7rem}
 
 /* Inhaltsverzeichnis: klappt von links aus, Einträge untereinander */
 .btn[aria-expanded="true"]{border-color:var(--accent);color:var(--accent)}

@@ -14,7 +14,7 @@ import { marked } from "./vendor/marked.esm.js";
 import { LOKALER_RECHNER, waehleQuelle } from "./daten.js";
 import { titelZeile, zeilenAenderung } from "./aenderung.js";
 import { kindOf } from "./zkn3.js";
-import { FARBEN, OHNE_FARBE, domLesen, feldHtml, klartext } from "./format.js";
+import { FARBEN, OHNE_FARBE, domLesen, feldHtml, klartext, zerlege, zusammensetzen } from "./format.js";
 import { exportHtml, exportName, leseExport } from "./export.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -60,8 +60,9 @@ const store = {
   set(key, value) {
     try {
       localStorage.setItem("roman." + key, JSON.stringify(value));
+      return true;
     } catch {
-      /* ohne Speicher geht es auch */
+      return false; // ohne Speicher geht es auch (nur die Rettungskopie fehlt dann)
     }
   },
 };
@@ -358,19 +359,21 @@ function istBearbeitet(entry, feld) {
 
 function toolbarHtml(feld, edited) {
   return `<div class="blk-tools"><span class="tag">${FELD_NAMEN[feld]}<span class="zustand">${edited ? " · bearbeitet" : ""}</span></span>`
+    + `<button type="button" class="tb" data-act="durchsetzen" hidden>Meine Fassung speichern</button>`
     + `<button type="button" class="tb" data-act="verwerfen"${edited ? "" : " hidden"}>Bearbeitung verwerfen</button></div>`;
 }
 
 function titleHtml(entry, tag) {
   const edited = istBearbeitet(entry, "title");
+  const titel = sitzungText(entry, "title") ?? entry.title;
   return `<div class="titelzeile"><div class="blk titel" data-feld="title">`
-    + `${toolbarHtml("title", edited)}<${tag} class="text ed" contenteditable="true" spellcheck="true" data-leer="${LEER_HINWEIS.title}">${escapeHtml(entry.title)}</${tag}></div>`
+    + `${toolbarHtml("title", edited)}<${tag} class="text ed" contenteditable="true" spellcheck="true" data-leer="${LEER_HINWEIS.title}">${escapeHtml(titel)}</${tag}></div>`
     + `<button type="button" class="kopieren" data-act="kopieren" title="Überschrift und Text kopieren (ohne Vermerke)" aria-label="Überschrift und Text kopieren">${COPY_ICON}</button></div>`;
 }
 
 /** Inhalt eines Feldes für den Browser (Text formatiert, Vermerke als reiner Text). */
 function feldInnen(entry, feld, startIndex = 0) {
-  const text = fieldText(entry, feld);
+  const text = sitzungText(entry, feld) ?? fieldText(entry, feld);
   const misc = feld === "misc";
   const { html, hits } = feldHtml(text, { term: state.term, startIndex, markClass: misc ? "treffer-v" : "treffer", formate: feld === "content" });
   // Endet der Text mit einem Zeilenumbruch, braucht die letzte (leere) Zeile einen Platzhalter
@@ -428,6 +431,7 @@ function showChapter(id, { restore = null, toHit = true } = {}) {
   state.view = { mode: "kapitel", id: entry.id };
   hitCounter = 0;
   doc.innerHTML = `<div class="kapitel" data-zettel="${escapeHtml(entry.id)}">${chapterHtml(entry, 1)}</div>${navHtml(entry)}`;
+  bindeSitzungen();
   loadOpenMisc();
   markCurrent(entry.id);
   updatePlace(entry);
@@ -465,6 +469,7 @@ async function loadMisc(details) {
     entry.misc = z.misc;
     entry.miscWords = z.miscWords;
     box.innerHTML = feldBlockHtml(entry, "misc");
+    bindeSitzungen(box);
   } catch (err) {
     box.innerHTML = `<p class="hint">${escapeHtml(err.message)}</p>`;
     delete details.dataset.geladen;
@@ -511,6 +516,7 @@ function showWhole(id, { offset = null } = {}) {
     parts.push(`<div class="kapitel" data-zettel="${escapeHtml(entry.id)}" style="content-visibility:auto;contain-intrinsic-size:auto ${estimateHeight(entry)}px">${chapterHtml(entry, 2)}</div>`);
   }
   doc.innerHTML = parts.join("");
+  bindeSitzungen();
   loadOpenMisc();
   state.chapters = $$(".kapitel", doc);
   state.wholeKey = key;
@@ -814,7 +820,7 @@ function insertText(text) {
 function setBlockState(block, status, detail = "") {
   if (!block) return;
   block.classList.toggle("wartet", status === "wartet" || status === "lokal");
-  block.classList.toggle("konflikt", status === "konflikt" || status === "fehler");
+  block.classList.toggle("konflikt", status === "konflikt" || status === "fehler" || status === "nichtGespeichert");
   const label = {
     ungespeichert: " · wird gleich gespeichert",
     speichert: " · speichert …",
@@ -822,11 +828,16 @@ function setBlockState(block, status, detail = "") {
     gespeichert: " · gespeichert ✓",
     wartet: " · wartet, bis das Zettelkasten-Programm geschlossen ist",
     ...(quelle?.zustandTexte || {}),
-    konflikt: ` · Konflikt: ${detail}`,
+    nichtGespeichert: ` · NOCH NICHT GESPEICHERT – ${quelle?.texte?.nichtErreichbar || "keine Verbindung"}; dein Text bleibt hier und wird von selbst gespeichert`,
+    konflikt: ` · NICHT GESPEICHERT, Konflikt: ${detail} Dein Text bleibt hier.`,
     fehler: ` · nicht gespeichert: ${detail}`,
   }[status] || (block.classList.contains("bearbeitet") ? " · bearbeitet" : "");
-  const zustand = $(".zustand", block);
-  if (zustand) zustand.textContent = label;
+  const zustandEl = $(":scope > .blk-tools .zustand", block);
+  if (zustandEl) zustandEl.textContent = label;
+  const durchsetzen = $(':scope > .blk-tools [data-act="durchsetzen"]', block);
+  if (durchsetzen) durchsetzen.hidden = status !== "konflikt";
+  const verwerfen = $(':scope > .blk-tools [data-act="verwerfen"]', block);
+  if (verwerfen) verwerfen.hidden = !(block.classList.contains("bearbeitet") || status === "konflikt" || status === "nichtGespeichert");
   if (leisteEd?.closest(".blk") === block) leisteZustand();
 }
 
@@ -896,51 +907,140 @@ function aenderungVon(session, jetzt) {
 
 const gleicheAenderung = (a, b) => Boolean(a && b) && a.start === b.start && a.vorher === b.vorher && a.nachher === b.nachher;
 
+// ------------------------------------------------------------------ Sitzungen: Getipptes geht nicht verloren
+// Eine Sitzung gehört zu einem Feld (Text, Vermerke oder Titel eines Zettels) – vom ersten
+// Hineinklicken, bis der Text nachweislich gespeichert ist. Solange sie besteht:
+// - zeigt das Feld IHREN Text, auch wenn das Kapitel neu gesetzt wird (Neuladen, Blättern, Suche);
+// - liegt eine Rettungskopie im Browser (localStorage), die auch Neuladen und Absturz übersteht
+//   und beim nächsten Öffnen wieder ins Feld kommt und gespeichert wird;
+// - wird, wenn das Speichern scheitert (Dienst nicht erreichbar), von selbst erneut gesendet.
+// Nur ein Konflikt (dieselbe Stelle wurde anderswo geändert) braucht deine Entscheidung.
+
+const sitzungen = new Map(); // `${zettel}\0${feld}` -> Sitzung
+
+const RETTUNG = "rettung";
+let rettungWarnung = false;
+const rettung = {
+  alle: () => store.get(RETTUNG, {}),
+  merken(eintrag) {
+    const alle = rettung.alle();
+    alle[eintrag.key] = eintrag;
+    if (!store.set(RETTUNG, alle) && !rettungWarnung) {
+      rettungWarnung = true;
+      toast("Der Browser lässt keine Rettungskopie mehr zu", "Bitte bald speichern oder etwas Text kopieren.", 10000);
+    }
+  },
+  loeschen(key) {
+    const alle = rettung.alle();
+    if (!(key in alle)) return;
+    delete alle[key];
+    store.set(RETTUNG, alle);
+  },
+};
+
+function sitzungMerken(s) {
+  if (s.ed?.isConnected) s.jetzt = edText(s.ed);
+  rettung.merken({ key: s.key, art: "feld", zettel: s.zettel, feld: s.feld, sitzung: s.id, raw: s.raw, basis: s.basis,
+    jetzt: s.jetzt, titel: s.titel, zeit: new Date().toISOString() });
+}
+
+/** Text, den das Feld gerade zeigen soll: der einer laufenden Sitzung, sonst der gespeicherte. */
+function sitzungText(entry, feld) {
+  const s = sitzungen.get(fkey(entry.id, feld));
+  return s ? s.jetzt : null;
+}
+
 function startSitzung(ed, { ausDemZettel = false } = {}) {
   const block = ed.closest(".blk");
   const entry = containerEntry(ed);
   if (!entry || !block) return null;
   const feld = block.dataset.feld || "content";
+  const key = fkey(entry.id, feld);
+  const vorhanden = sitzungen.get(key);
+  if (vorhanden) {
+    ed._sitzung = vorhanden;
+    vorhanden.ed = ed;
+    return vorhanden;
+  }
   const raw = fieldText(entry, feld);
   // basis: derselbe Stand, wie der Browser ihn zurückliest (sonst – wenn schon getippt wurde – der Zettel)
-  ed._sitzung = { id: uid(), zettel: entry.id, feld, raw, basis: feld === "title" || ausDemZettel ? raw : edText(ed),
-    ursprung: raw, sent: false, letzte: null, gesendet: null };
-  return ed._sitzung;
+  const basis = feld === "title" || ausDemZettel ? raw : edText(ed);
+  const s = { key, id: uid(), zettel: entry.id, feld, raw, basis, ursprung: raw, jetzt: feld === "title" ? raw : basis,
+    titel: entry.title, sent: false, letzte: null, gesendet: null, aktiv: true, ed, zustand: null, meldung: "", versuche: 0 };
+  sitzungen.set(key, s);
+  ed._sitzung = s;
+  return s;
 }
 
-function handleSaveResult(entry, block, session, result) {
+/** Nach dem Setzen eines Kapitels: die Felder mit laufender Sitzung wieder an sie binden. */
+function bindeSitzungen(root = doc) {
+  if (!sitzungen.size) return;
+  for (const ed of $$(".blk[data-feld] > .ed", root)) {
+    const entry = containerEntry(ed);
+    const s = entry && sitzungen.get(fkey(entry.id, ed.closest(".blk").dataset.feld));
+    if (!s) continue;
+    ed._sitzung = s;
+    s.ed = ed;
+    setBlockState(ed.closest(".blk"), s.zustand, s.meldung);
+  }
+}
+
+function zustand(s, status, detail = "") {
+  s.zustand = status;
+  s.meldung = detail;
+  if (s.ed?.isConnected) setBlockState(s.ed.closest(".blk"), status, detail);
+  zeigeUngesichert();
+}
+
+/** Kopfzeile: ein unübersehbarer Hinweis, solange etwas nicht gespeichert ist. */
+function zeigeUngesichert() {
+  const el = $("#ungesichert");
+  const offen = [...sitzungen.values()].filter((s) => s.zustand === "nichtGespeichert" || s.zustand === "konflikt");
+  const material = $$(".md-blk.nicht-gespeichert", doc).length;
+  const n = offen.length + material;
+  if (!n) {
+    el.hidden = true;
+    el.textContent = "";
+  } else {
+    const konflikt = offen.some((s) => s.zustand === "konflikt");
+    const ziel = offen[0] ? `#kapitel/${encodeURIComponent(offen[0].zettel)}` : "#";
+    el.innerHTML = `<a href="${ziel}">⚠ ${n === 1 ? "Ein Text ist" : `${n} Texte sind`} noch nicht gespeichert`
+      + `${konflikt ? " (Konflikt – bitte entscheiden)" : ` – ${escapeHtml(quelle?.texte?.nichtErreichbar || "keine Verbindung")}`}. Dein Text bleibt im Feld.</a>`;
+    el.hidden = false;
+  }
+  $(".legend").hidden = el.hidden && !$("#speicherstand").textContent;
+  hdrHeight();
+}
+
+function handleSaveResult(entry, block, session, result, fertig) {
   if (result.stand || result.version) state.version = result.stand || result.version;
   if (result.bearbeitung) updateEditStatus(result.bearbeitung);
-  if (result.git) updateGit(result.git); // unterwegs: „Gesichert“, sobald die Änderung auf GitHub ist
-  if (result.status === "konflikt") {
-    setBlockState(block, "konflikt", result.meldung || "");
-    toast("Diese Stelle wurde inzwischen anderswo geändert", "Deine Fassung ist nicht gespeichert – kopiere sie, bevor du neu lädst.", 12000);
-    return;
-  }
-  if (result.status === "fehler") {
-    setBlockState(block, "fehler", result.meldung || "");
-    toast("Speichern ist fehlgeschlagen", result.meldung || "", 10000);
-    return;
-  }
-  if (typeof result.text === "string") {
+  if (result.git) updateGit(result.git); // unterwegs: „Auf GitHub ✓“, sobald die Änderung oben ist
+  if (entry && typeof result.text === "string") {
     updateField(entry, session.feld, result.text);
     setEdited(block, merkeBearbeitung(session, result.text));
   }
   // Ein fertiger Titel steht so da, wie er gespeichert ist (eine Zeile, ohne Leerraum am Rand)
   const ed = block?.isConnected ? $(":scope > .ed", block) : null;
-  if (session.feld === "title" && session.fertig && ed && document.activeElement !== ed && ed.textContent !== entry.title) {
+  if (entry && session.feld === "title" && fertig && !session.aktiv && ed && document.activeElement !== ed && ed.textContent !== entry.title) {
     ed.textContent = entry.title;
+    session.jetzt = entry.title;
   }
   const outcome = result.einspielen?.status;
-  if (outcome === "wartet") setBlockState(block, "wartet");
-  else if (outcome === "lokal") setBlockState(block, "lokal");
+  let status = null;
+  let detail = "";
+  if (outcome === "wartet") status = "wartet";
+  else if (outcome === "lokal") status = "lokal";
   else if (outcome === "fehler") {
-    setBlockState(block, "fehler", result.einspielen.meldung || "");
-    toast("Eingespielt werden konnte nicht", result.einspielen.meldung || "", 10000);
-  } else if (outcome === "konflikt") setBlockState(block, "konflikt", "siehe Hinweis oben");
-  else if (outcome === "gespeichert") setBlockState(block, "gespeichert");
-  else if (result.status === "offen") setBlockState(block, "offen");
-  else setBlockState(block, null);
+    status = "fehler";
+    detail = result.einspielen.meldung || "";
+    toast("Eingespielt werden konnte nicht", detail, 10000);
+  } else if (outcome === "konflikt") {
+    status = "fehler";
+    detail = "siehe Hinweis oben";
+  } else if (outcome === "gespeichert") status = "gespeichert";
+  else if (result.status === "offen") status = "offen";
+  zustand(session, status, detail);
 }
 
 function senden(session, change, fertig) {
@@ -948,64 +1048,195 @@ function senden(session, change, fertig) {
     nachher: change.nachher, sitzung: session.id, fertig });
 }
 
-function save(ed, fertig) {
-  const session = ed._sitzung;
-  if (!session) return Promise.resolve();
-  if (fertig) {
-    delete ed._sitzung;
-    session.fertig = true;
+/** Dieselbe Eingabe läuft weiter, aber was bisher gesendet wurde, ist schon eingespielt: von dort aus rechnen. */
+function neuAnsetzen(s, serverText, gesendet) {
+  s.raw = serverText;
+  s.basis = gesendet ?? s.basis;
+  s.id = uid();
+  s.letzte = null;
+  s.sent = false;
+}
+
+/** Gespeichert und fertig: Sitzung und Rettungskopie weg, das Feld zeigt den gespeicherten Stand. */
+function abschliessen(s) {
+  s.erledigt = true;
+  clearTimeout(s.timer);
+  clearTimeout(s.eingabeTimer);
+  sitzungen.delete(s.key);
+  rettung.loeschen(s.key);
+  const ed = s.ed;
+  if (ed && ed._sitzung === s) delete ed._sitzung;
+  zeigeUngesichert();
+  if (ed) setTimeout(() => nachEingabe(ed), 0);
+}
+
+function planeWiederholung(s) {
+  clearTimeout(s.timer);
+  const pause = Math.min(30000, 1500 * 2 ** Math.min(Math.max(s.versuche - 1, 0), 5));
+  s.timer = setTimeout(() => save(s, !s.aktiv), pause);
+}
+
+/** Wieder Verbindung: alles, was noch nicht gespeichert ist, gleich noch einmal senden. */
+function wiederholeAlle() {
+  for (const s of sitzungen.values()) {
+    if (s.zustand === "nichtGespeichert") {
+      clearTimeout(s.timer);
+      save(s, !s.aktiv);
+    }
   }
-  const block = ed.closest(".blk");
+}
+
+function save(s, fertig) {
+  if (!s || s.erledigt) return Promise.resolve();
   const run = async () => {
-    const entry = entryById(session.zettel);
-    let jetzt = edText(ed);
-    if (session.feld === "title" && !jetzt) {
+    if (s.erledigt) return;
+    const ed = s.ed?.isConnected ? s.ed : null;
+    const block = ed?.closest(".blk") || null;
+    if (ed) s.jetzt = edText(ed);
+    let jetzt = s.jetzt;
+    if (s.feld === "title" && !jetzt) {
       if (!fertig) return; // ein leerer Titel wird nicht gespeichert
-      jetzt = session.letzte ? session.letzte.nachher : session.raw; // zurück zum zuletzt gespeicherten Titel
-      ed.textContent = jetzt;
+      jetzt = s.letzte ? s.letzte.nachher : s.raw; // zurück zum zuletzt gespeicherten Titel
+      s.jetzt = jetzt;
+      if (ed) ed.textContent = jetzt;
       if (jetzt) toast("Ein Titel darf nicht leer sein", "Der bisherige Titel bleibt stehen.", 5000);
     }
-    let change = aenderungVon(session, jetzt);
+    let change = aenderungVon(s, jetzt);
     if (!change) {
-      if (!session.sent) {
-        setBlockState(block, null);
+      if (!s.sent) {
+        if (fertig && !s.aktiv) abschliessen(s); // nichts geändert
+        else zustand(s, null);
         return;
       }
-      change = { ...session.letzte, nachher: session.letzte.vorher }; // wieder wie am Anfang: zurücknehmen
+      change = { ...s.letzte, nachher: s.letzte.vorher }; // wieder wie am Anfang: zurücknehmen
     }
-    if (!fertig && gleicheAenderung(change, session.letzte)) return;
-    session.sent = true;
-    setBlockState(block, "speichert");
+    if (!fertig && s.zustand !== "nichtGespeichert" && gleicheAenderung(change, s.letzte)) return;
+    s.sent = true;
+    zustand(s, "speichert");
+    sitzungMerken(s);
     state.saving += 1;
     try {
-      let result = await senden(session, change, fertig);
+      let result = await senden(s, change, fertig);
       if (result.status === "neu-ansetzen") {
-        // Was in dieser Eingabe bisher geschrieben wurde, ist schon eingespielt: von dort aus weiter
-        session.raw = result.text;
-        session.basis = session.gesendet ?? session.basis;
-        session.id = uid();
-        session.letzte = null;
-        change = aenderungVon(session, jetzt);
+        neuAnsetzen(s, result.text, s.gesendet);
+        change = aenderungVon(s, jetzt);
         if (!change) {
-          session.sent = false;
-          handleSaveResult(entry, block, session, { ...result, status: "unveraendert" });
+          handleSaveResult(entryById(s.zettel), block, s, { ...result, status: "unveraendert" }, fertig);
+          if (fertig && !s.aktiv) abschliessen(s);
           return;
         }
-        result = await senden(session, change, fertig);
+        s.sent = true;
+        result = await senden(s, change, fertig);
       }
-      session.letzte = change;
-      session.gesendet = jetzt;
-      handleSaveResult(entry, block, session, result);
+      s.versuche = 0;
+      clearTimeout(s.timer);
+      if (result.status === "konflikt" || result.status === "fehler") {
+        // Nichts wird verworfen: der Text bleibt im Feld und in der Rettungskopie, bis du entscheidest
+        s.konfliktText = typeof result.text === "string" ? result.text : null;
+        zustand(s, "konflikt", result.meldung || "");
+        toast("Nicht gespeichert: Konflikt", "Diese Stelle wurde inzwischen anderswo geändert. Dein Text bleibt im Feld – „Meine Fassung speichern“ oder „Bearbeitung verwerfen“.", 15000);
+        return;
+      }
+      s.letzte = change;
+      s.gesendet = jetzt;
+      handleSaveResult(entryById(s.zettel), block, s, result, fertig);
+      if (fertig) {
+        const weiter = s.aktiv || (s.ed?.isConnected && edText(s.ed) !== jetzt);
+        if (weiter) neuAnsetzen(s, typeof result.text === "string" ? result.text : jetzt, jetzt); // während des Speicherns weitergeschrieben
+        else abschliessen(s);
+      }
     } catch (err) {
-      setBlockState(block, "fehler", err.message);
-      toast("Speichern ist fehlgeschlagen", `${err.message} – der Text steht noch im Feld.`, 10000);
+      // Der Dienst (bzw. das Gerät) war nicht erreichbar: Text bleibt, Rettungskopie bleibt, später noch einmal
+      s.versuche += 1;
+      zustand(s, "nichtGespeichert", err.message);
+      sitzungMerken(s);
+      if (s.versuche === 1) {
+        toast("Noch nicht gespeichert", `${quelle?.texte?.nichtErreichbar || "Keine Verbindung"}. Dein Text bleibt im Feld und wird von selbst gespeichert, sobald es wieder geht.`, 12000);
+      }
+      planeWiederholung(s);
     } finally {
       state.saving -= 1;
     }
   };
-  session.chain = (session.chain || Promise.resolve()).then(run, run);
-  ed._kette = session.chain;
-  return session.chain.then(() => { if (fertig) setTimeout(() => nachEingabe(ed), 0); });
+  s.chain = (s.chain || Promise.resolve()).then(run, run);
+  return s.chain;
+}
+
+/** Konflikt: deine Fassung trotzdem speichern (ersetzt, was anderswo an denselben Zeilen geändert wurde). */
+function durchsetzen(s) {
+  if (!window.confirm("Deine Fassung speichern? Was anderswo an denselben Zeilen geändert wurde, wird dabei ersetzt.")) return;
+  const entry = entryById(s.zettel);
+  const server = s.konfliktText ?? (entry ? fieldText(entry, s.feld) : null);
+  if (server === null) return;
+  neuAnsetzen(s, server, server);
+  zustand(s, null);
+  save(s, !s.aktiv);
+}
+
+/** Nicht gespeicherten Text eines Feldes bewusst verwerfen. */
+function verwirfSitzung(s) {
+  if (!window.confirm("Deinen nicht gespeicherten Text in diesem Feld verwerfen? Er lässt sich danach nicht wiederherstellen.")) return false;
+  const ed = s.ed;
+  abschliessen(s);
+  if (ed?.isConnected) {
+    delete ed._sitzung;
+    setTimeout(() => feldNeuSetzen(ed), 0);
+  }
+  return true;
+}
+
+/** Beim Öffnen: Rettungskopien von früher wieder in ihre Felder bringen und speichern. */
+async function rettungEinspielen() {
+  const alle = rettung.alle();
+  let wieder = 0;
+  const material = [];
+  for (const [key, r] of Object.entries(alle)) {
+    if (r.art === "datei") {
+      material.push(r);
+      continue;
+    }
+    if (!r || typeof r.jetzt !== "string" || typeof r.raw !== "string" || sitzungen.has(key)) continue;
+    let entry = entryById(r.zettel);
+    try {
+      if (!entry || (r.feld === "misc" && entry.misc === undefined)) {
+        const z = await quelle.zettel(r.zettel);
+        if (entry) {
+          entry.misc = z.misc;
+          entry.miscWords = z.miscWords;
+        } else {
+          entry = { id: z.id, title: z.title, text: z.content, misc: z.misc, kind: z.kind, words: z.words, miscWords: z.miscWords,
+            edited: z.edited, pos: null, section: null, desktop: null, comment: "" };
+          state.extra.set(entry.id, entry);
+        }
+      }
+    } catch {
+      continue; // jetzt nicht lesbar – die Kopie bleibt für das nächste Mal
+    }
+    if (gleicherText(fieldText(entry, r.feld), r.jetzt, r.feld)) {
+      rettung.loeschen(key); // ist schon gespeichert
+      continue;
+    }
+    const s = { key, id: r.sitzung || uid(), zettel: String(r.zettel), feld: r.feld, raw: r.raw, basis: r.basis ?? r.raw,
+      ursprung: r.raw, jetzt: r.jetzt, titel: r.titel || entry.title, sent: false, letzte: null, gesendet: null, aktiv: false,
+      ed: null, zustand: null, meldung: "", versuche: 0 };
+    sitzungen.set(key, s);
+    if (r.feld === "misc") state.openMisc.add(String(r.zettel));
+    wieder += 1;
+    save(s, true);
+  }
+  if (wieder) {
+    toast(`${wieder === 1 ? "Ein nicht gespeicherter Text" : `${wieder} nicht gespeicherte Texte`} wiederhergestellt`,
+      "Er steht wieder im Feld und wird jetzt gespeichert.", 9000);
+  }
+  for (const r of material) materialRettung(r);
+}
+
+const ohneRandZeilen = (t) => String(t ?? "").replace(/^(?:[ \t]*\n)+/, "").replace(/(?:\n[ \t]*)+$/, "");
+
+function gleicherText(a, b, feld) {
+  if (feld === "title") return titelZeile(a) === titelZeile(b);
+  const norm = (t) => ohneRandZeilen(feld === "content" ? zusammensetzen(zerlege(t)) : t);
+  return norm(a) === norm(b);
 }
 
 /** Stelle der Auswahl im Klartext eines Feldes (zum Wiederherstellen nach dem Neusetzen). */
@@ -1038,11 +1269,11 @@ function setzeAuswahl(ed, stelle) {
   selection.addRange(range);
 }
 
-/** Nach einer Eingabe: das Feld so setzen, wie es gespeichert ist (Anmerkungen, Formatierung, Zeilen). */
+/** Nach einer gespeicherten Eingabe: das Feld so setzen, wie es gespeichert ist (Anmerkungen, Formatierung, Zeilen). */
 function feldNeuSetzen(ed) {
   const block = ed.closest(".blk");
   const entry = containerEntry(ed);
-  if (!entry || !block || ed._sitzung) return;
+  if (!entry || !block || ed._sitzung || sitzungen.has(fkey(entry.id, block.dataset.feld || "content"))) return; // nie über Ungespeichertes
   const feld = block.dataset.feld || "content";
   if (feld === "title") {
     if (ed.textContent !== entry.title) ed.textContent = entry.title;
@@ -1067,6 +1298,21 @@ function nachEingabe(ed) {
   }
 }
 
+/** Getippt (oder formatiert): Sitzung aktuell halten, Rettungskopie, gleich speichern. */
+function eingabe(ed) {
+  const s = ed._sitzung || startSitzung(ed, { ausDemZettel: true }); // auch ohne focusin (manche Browser)
+  if (!s) return;
+  s.aktiv = true;
+  s.ed = ed;
+  if (s.zustand !== "konflikt" && s.zustand !== "nichtGespeichert") zustand(s, "ungespeichert");
+  clearTimeout(s.rettungTimer);
+  s.rettungTimer = setTimeout(() => sitzungMerken(s), 400);
+  clearTimeout(s.eingabeTimer);
+  s.eingabeTimer = setTimeout(() => {
+    if (s.zustand !== "konflikt") save(s, false);
+  }, 1500);
+}
+
 doc.addEventListener("focusin", (event) => {
   const ed = event.target.closest?.(".ed");
   if (!ed) return;
@@ -1079,7 +1325,11 @@ doc.addEventListener("focusin", (event) => {
     versteckeLeiste();
     return;
   }
-  if (!ed._sitzung) startSitzung(ed);
+  const s = ed._sitzung || startSitzung(ed);
+  if (s) {
+    s.aktiv = true;
+    s.ed = ed;
+  }
   zeigeLeiste(ed);
 });
 
@@ -1093,12 +1343,13 @@ doc.addEventListener("input", (event) => {
   const ed = event.target.closest?.(".ed");
   if (!ed) return;
   ensureEnde(ed);
-  if (ed.closest(".md-blk")) return;
+  if (ed.closest(".md-blk")) {
+    clearTimeout(ed._rettungTimer);
+    ed._rettungTimer = setTimeout(() => materialMerken(ed), 400);
+    return;
+  }
   if (leisteEd !== ed && feldVonEd(ed) !== "title") zeigeLeiste(ed);
-  if (!ed._sitzung && !startSitzung(ed, { ausDemZettel: true })) return; // ohne focusin (manche Browser)
-  setBlockState(ed.closest(".blk"), "ungespeichert");
-  clearTimeout(ed._timer);
-  ed._timer = setTimeout(() => save(ed, false), 1500);
+  eingabe(ed);
   if (feldVonEd(ed) === "content") nummernBald(ed.closest(".blk"));
 });
 
@@ -1109,8 +1360,14 @@ doc.addEventListener("focusout", (event) => {
     materialFertig(ed);
     return;
   }
-  clearTimeout(ed._timer);
-  if (ed._sitzung) save(ed, true);
+  const s = ed._sitzung;
+  if (s) {
+    clearTimeout(s.eingabeTimer);
+    s.jetzt = edText(ed);
+    s.aktiv = false;
+    if (s.zustand !== "konflikt") save(s, true);
+    else sitzungMerken(s);
+  }
   if (!leiste.contains(event.relatedTarget)) versteckeLeiste();
 });
 
@@ -1148,17 +1405,20 @@ doc.addEventListener("drop", (event) => {
 });
 
 window.addEventListener("pagehide", () => {
+  // Erst die Rettungskopien (die bleiben, bis beim nächsten Öffnen feststeht, dass alles gespeichert ist) …
   const bodies = [];
-  for (const ed of $$(".ed")) {
-    const session = ed._sitzung;
-    if (!session) continue;
-    let jetzt = edText(ed);
-    if (session.feld === "title" && !jetzt) jetzt = session.raw;
-    const change = aenderungVon(session, jetzt) || (session.sent ? { ...session.letzte, nachher: session.letzte.vorher } : null);
+  for (const s of sitzungen.values()) {
+    sitzungMerken(s);
+    if (s.zustand === "konflikt") continue;
+    let jetzt = s.jetzt;
+    if (s.feld === "title" && !jetzt) jetzt = s.raw;
+    const change = aenderungVon(s, jetzt) || (s.sent ? { ...s.letzte, nachher: s.letzte.vorher } : null);
     if (!change) continue;
-    bodies.push({ zettel: session.zettel, feld: session.feld, start: change.start, vorher: change.vorher,
-      nachher: change.nachher, sitzung: session.id, fertig: true });
+    bodies.push({ zettel: s.zettel, feld: s.feld, start: change.start, vorher: change.vorher,
+      nachher: change.nachher, sitzung: s.id, fertig: true });
   }
+  for (const ed of $$(".md-blk .ed")) materialMerken(ed);
+  // … dann noch schnell senden (ohne auf Antwort zu warten)
   if (bodies.length && quelle) quelle.verlassen(bodies);
   for (const ed of $$(".md-blk .ed")) {
     const sitzung = ed._material;
@@ -1256,8 +1516,20 @@ doc.addEventListener("click", (event) => {
   }
   const button = event.target.closest('[data-act="verwerfen"]');
   if (button) {
+    const block = button.closest(".blk");
+    const s = $(":scope > .ed", block)?._sitzung;
+    if (s && (s.zustand === "konflikt" || s.zustand === "nichtGespeichert")) {
+      verwirfSitzung(s);
+      return;
+    }
     const entry = containerEntry(button);
-    if (entry) discardEdit(entry, button.closest(".blk"));
+    if (entry) discardEdit(entry, block);
+    return;
+  }
+  const durch = event.target.closest('[data-act="durchsetzen"]');
+  if (durch) {
+    const s = $(":scope > .ed", durch.closest(".blk"))?._sitzung;
+    if (s) durchsetzen(s);
     return;
   }
   const blk = event.target.closest?.(".md-blk");
@@ -1306,11 +1578,7 @@ function leisteZustand() {
 }
 
 function planeSpeichern(ed) {
-  if (!ed) return;
-  if (!ed._sitzung) startSitzung(ed, { ausDemZettel: true });
-  setBlockState(ed.closest(".blk"), "ungespeichert");
-  clearTimeout(ed._timer);
-  ed._timer = setTimeout(() => save(ed, false), 1500);
+  if (ed) eingabe(ed);
 }
 
 function formatieren(befehl, wert) {
@@ -1345,8 +1613,13 @@ function baueLeiste() {
       const ed = leisteEd;
       const block = ed.closest(".blk");
       const entry = containerEntry(ed);
+      const s = ed._sitzung;
+      if (s && (s.zustand === "konflikt" || s.zustand === "nichtGespeichert")) {
+        verwirfSitzung(s);
+        return;
+      }
       ed.blur();
-      await (ed._kette || Promise.resolve());
+      await (s?.chain || Promise.resolve());
       if (entry && block) discardEdit(entry, block);
     }
   });
@@ -1664,10 +1937,26 @@ function materialBearbeiten(blk, event) {
   }
 }
 
+const materialKey = (sitzung) => `datei\u0000${sitzung.datei}\u0000${sitzung.id}`;
+
+/** Rettungskopie eines Material-Blocks, der gerade bearbeitet wird (übersteht Neuladen und Absturz). */
+function materialMerken(ed) {
+  const sitzung = ed._material;
+  if (!sitzung) return;
+  const nachher = domLesen(ed, { formate: false });
+  if (nachher === sitzung.vorher && !sitzung.versuche) {
+    rettung.loeschen(materialKey(sitzung));
+    return;
+  }
+  rettung.merken({ key: materialKey(sitzung), art: "datei", datei: sitzung.datei, start: sitzung.start, vorher: sitzung.vorher,
+    nachher, sitzung: sitzung.id, zeit: new Date().toISOString() });
+}
+
 async function materialFertig(ed) {
   const sitzung = ed._material;
   if (!sitzung) return;
   delete ed._material;
+  clearTimeout(sitzung.timer);
   const blk = ed.closest(".md-blk");
   const jetzt = domLesen(ed, { formate: false });
   const path = sitzung.datei;
@@ -1675,29 +1964,37 @@ async function materialFertig(ed) {
   // Neu gesetzt wird erst, wenn kein anderer Block mehr offen ist (sonst ginge dort Getipptes verloren)
   const andereOffen = () => $$(".md-blk.bearbeiten", doc).some((b) => b !== blk);
   if (jetzt === sitzung.vorher) {
+    rettung.loeschen(materialKey(sitzung));
     if (blk && blk._gesetzt !== undefined && !state.materialNeu) {
       blk.innerHTML = blk._gesetzt; // unverändert: nur diesen Block wieder setzen
-      blk.classList.remove("bearbeiten", "konflikt");
+      blk.classList.remove("bearbeiten", "konflikt", "nicht-gespeichert");
     } else if (hier() && !andereOffen()) {
       state.materialNeu = false;
       zeigeMaterial(path, { scroll: window.scrollY });
     }
+    zeigeUngesichert();
     return;
   }
+  materialMerken(Object.assign(ed, { _material: sitzung })); // erst die Rettungskopie …
+  delete ed._material;
   blk?.classList.add("speichert");
   try {
     const result = await quelle.materialAendern({ datei: path, start: sitzung.start, vorher: sitzung.vorher, nachher: jetzt, sitzung: sitzung.id });
+    blk?.classList.remove("speichert", "nicht-gespeichert");
     if (result.git) updateGit(result.git);
     if (result.status === "konflikt" || result.status === "fehler") {
-      blk?.classList.remove("speichert");
+      // Nichts wird verworfen: der Text bleibt im Block und in der Rettungskopie
+      ed._material = { ...sitzung, konflikt: true };
       blk?.classList.add("konflikt");
-      toast(result.status === "konflikt" ? "Dieser Abschnitt wurde inzwischen anderswo geändert" : "Speichern ist fehlgeschlagen",
-        `${result.meldung || ""} Dein Text steht noch da – kopiere ihn, bevor du die Seite neu lädst.`, 12000);
+      toast(result.status === "konflikt" ? "Nicht gespeichert: dieser Abschnitt wurde inzwischen anderswo geändert" : "Nicht gespeichert",
+        `${result.meldung || ""} Dein Text bleibt im Block – kopiere ihn, bevor du die Seite neu lädst.`, 15000);
       return;
     }
-    if (hier()) {
+    rettung.loeschen(materialKey(sitzung));
+    if (hier() && !ed.isConnected) {
+      state.materialText = result.text; // der Block ist schon weg (anderes Kapitel): nur den Stand merken
+    } else if (hier()) {
       state.materialText = result.text;
-      blk?.classList.remove("speichert");
       if (andereOffen()) state.materialNeu = true;
       else {
         state.materialNeu = false;
@@ -1706,11 +2003,63 @@ async function materialFertig(ed) {
     }
     loadMaterial(); // die Überschrift kann sich geändert haben (Inhaltsverzeichnis)
   } catch (err) {
+    // Nicht erreichbar: Text bleibt, Rettungskopie bleibt, später von selbst noch einmal
+    sitzung.versuche = (sitzung.versuche || 0) + 1;
+    ed._material = sitzung;
     blk?.classList.remove("speichert");
-    blk?.classList.add("konflikt");
-    toast("Speichern ist fehlgeschlagen", `${err.message} – dein Text steht noch da.`, 10000);
+    blk?.classList.add("nicht-gespeichert");
+    materialMerken(ed);
+    if (sitzung.versuche === 1) {
+      toast("Noch nicht gespeichert", `${quelle?.texte?.nichtErreichbar || "Keine Verbindung"}. Dein Text bleibt im Block und wird von selbst gespeichert.`, 12000);
+    }
+    const pause = Math.min(30000, 1500 * 2 ** Math.min(sitzung.versuche - 1, 5));
+    sitzung.timer = setTimeout(() => {
+      if (ed._material !== sitzung) return;
+      if (document.activeElement === ed) return; // wird gerade bearbeitet: beim Verlassen
+      materialFertig(ed);
+    }, pause);
+  } finally {
+    zeigeUngesichert();
   }
 }
+
+/** Beim Öffnen: eine Rettungskopie aus dem Material noch einmal speichern – oder zum Kopieren zeigen. */
+async function materialRettung(r) {
+  try {
+    const result = await quelle.materialAendern({ datei: r.datei, start: r.start, vorher: r.vorher, nachher: r.nachher, sitzung: r.sitzung });
+    const schonDa = typeof result.text === "string" && result.text.includes(String(r.nachher).replace(/^\n+|\n+$/g, ""));
+    if (result.status !== "konflikt" && result.status !== "fehler") {
+      rettung.loeschen(r.key);
+      toast("Nicht gespeicherter Text wiederhergestellt", `${r.datei} – jetzt gespeichert.`, 8000);
+      if (result.status === "gespeichert") loadMaterial();
+      return;
+    }
+    if (schonDa) {
+      rettung.loeschen(r.key);
+      return;
+    }
+    openInsp("Nicht gespeichert", r.datei, `<p>Dieser Text aus dem Material wurde nicht gespeichert, weil der Abschnitt inzwischen anderswo geändert wurde. Kopiere ihn und füge ihn von Hand ein.</p>`
+      + `<pre class="rettung-text">${escapeHtml(r.nachher)}</pre>`
+      + `<p><button class="tb" type="button" data-rettung-kopieren="${escapeHtml(r.key)}">Kopieren</button> `
+      + `<button class="tb" type="button" data-rettung-weg="${escapeHtml(r.key)}">Erledigt – Kopie löschen</button></p>`, "rettung");
+  } catch {
+    /* jetzt nicht erreichbar: die Kopie bleibt für das nächste Mal */
+  }
+}
+
+insp.addEventListener("click", async (event) => {
+  const kopieren = event.target.closest("[data-rettung-kopieren]");
+  if (kopieren) {
+    const r = rettung.alle()[kopieren.dataset.rettungKopieren];
+    if (r && (await toClipboard(r.nachher))) toast("Kopiert");
+    return;
+  }
+  const weg = event.target.closest("[data-rettung-weg]");
+  if (weg) {
+    rettung.loeschen(weg.dataset.rettungWeg);
+    closeInsp();
+  }
+});
 
 // ------------------------------------------------------------------ Zettel außerhalb der Anordnung
 
@@ -1732,6 +2081,7 @@ async function showZettel(id, { restore = null } = {}) {
     markCurrent(null);
     hitCounter = 0;
     doc.innerHTML = `<div class="kapitel" data-zettel="${escapeHtml(entry.id)}">${chapterHtml(entry, 1)}</div>`;
+    bindeSitzungen();
     loadOpenMisc();
     if (state.term && hitCounter && restore === null) scrollToHit(state.hitIndex);
     else window.scrollTo(0, restore ?? 0);
@@ -1758,7 +2108,7 @@ function updateEditStatus(b) {
   else if (b.offen) { text = `${n(b.offen, "Änderung wird", "Änderungen werden")} gleich eingespielt`; cls = "offen"; }
   el.className = `speicherstand ${cls}`;
   el.innerHTML = text ? `<a href="#" data-oeffnet="1" id="zu-aenderungen">${escapeHtml(text)}</a>` : "";
-  el.parentElement.hidden = !text; // die Zeile erscheint nur, wenn es etwas zu melden gibt
+  el.parentElement.hidden = !text && $("#ungesichert").hidden; // die Zeile erscheint nur, wenn es etwas zu melden gibt
   hdrHeight();
 }
 
@@ -1812,7 +2162,7 @@ async function sichern() {
   knopfZeigen(button, "laedt");
   try {
     // Was eben noch im Feld stand (der Klick hat die Eingabe beendet), erst fertig speichern
-    await Promise.all($$("#doc .ed").map((ed) => ed._kette).filter(Boolean));
+    await Promise.all([...sitzungen.values()].map((s) => s.chain).filter(Boolean));
     const result = await quelle.sichern();
     toast(result.message, result.detail || result.committed || "", result.ok ? 4500 : 10000);
     if (result.git) state.git = result.git;
@@ -1843,6 +2193,7 @@ async function poll() {
     const status = await quelle.status();
     if (!state.online) toast(quelle.texte.wieder);
     state.online = true;
+    wiederholeAlle();
     updateGit(status.git);
     if (status.bearbeitung) updateEditStatus(status.bearbeitung);
     if (status.error && status.error !== state.lastError) toast(status.error, "", 8000);
@@ -2115,6 +2466,7 @@ async function init() {
     return;
   }
   if (quelle.modus !== "lokal") loadMaterial();
+  await rettungEinspielen();
   await route();
   document.body.dataset.bereit = "1";
   poll();

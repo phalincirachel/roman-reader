@@ -70,6 +70,7 @@ export function lokaleQuelle() {
     texte: {
       offline: ["Keine Verbindung zum Reader-Dienst", "Über die Verknüpfung „Roman“ startet er neu."],
       wieder: "Verbindung zum Reader-Dienst wieder da.",
+      nichtErreichbar: "der Reader-Dienst antwortet nicht (läuft er nicht mehr, starte ihn mit einem Doppelklick auf „Roman“ – dieses Fenster speichert dann von selbst)",
     },
   };
 }

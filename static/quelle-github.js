@@ -506,6 +506,7 @@ export function githubQuelle({ apiBase, test = false }) {
     texte: {
       offline: ["Keine Verbindung zu GitHub", "Deine Änderungen bleiben auf diesem Gerät und werden später hochgeladen."],
       wieder: "Verbindung zu GitHub wieder da.",
+      nichtErreichbar: "der Speicher dieses Geräts antwortet nicht",
     },
     zustandTexte: {
       offen: " · zwischengespeichert",
