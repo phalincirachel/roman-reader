@@ -1,14 +1,16 @@
 // Reader für den Roman – Grundlage ist überarbeitung33.html.
-// Lesen und Bearbeiten: Jeder Absatz ist direkt beschreibbar. Auf dem Laptop wird über den
-// lokalen Dienst gespeichert (Schreibwerkzeug mit Sicherungskopie und Änderungsbuch; solange
-// das Zettelkasten-Programm geöffnet ist, warten die Änderungen). Unterwegs (Chromebook)
-// kommen Text und Änderungen über GitHub – siehe daten.js.
+// Lesen und Bearbeiten: Jeder Absatz, der Titel und die Sonstigen Vermerke sind direkt
+// beschreibbar. Auf dem Laptop wird über den lokalen Dienst gespeichert (Schreibwerkzeug mit
+// Sicherungskopie und Änderungsbuch; solange das Zettelkasten-Programm geöffnet ist, warten
+// die Änderungen). Unterwegs (Chromebook) kommen Text und Änderungen über GitHub – siehe daten.js.
 import {
   escapeHtml, findAll, snippetHtml, formatNumber, formatDate, readingMinutes, KIND_LABELS,
-  paragraphSpans, editableHtml, renderText, countWords, bookTitle,
+  paragraphSpans, editableHtml, countWords, bookTitle,
 } from "./textsatz.js";
 import { marked } from "./vendor/marked.esm.js";
 import { LOKALER_RECHNER, waehleQuelle } from "./daten.js";
+import { titelZeile } from "./aenderung.js";
+import { kindOf } from "./zkn3.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -114,15 +116,24 @@ const state = {
   wholeKey: null,
   chapters: [],
   currentWhole: null,
-  rerender: new Set(),
-  edited: new Map(), // `${zettel}\0${jetziger Text}` -> Text vor der ersten Bearbeitung in dieser Sitzung
+  rerender: new Set(), // Kapitel, deren Absätze nach dem Bearbeiten neu gesetzt werden
+  rerenderMisc: new Set(), // ebenso für die Sonstigen Vermerke
+  openMisc: new Set(), // Zettel, deren Sonstige Vermerke aufgeklappt sind
+  edited: new Map(), // `${zettel}\0${feld}\0${jetziger Text}` -> Text vor der ersten Bearbeitung in dieser Sitzung
   saving: 0,
   reloadWanted: false,
   lastError: null,
   title: "Roman",
 };
 
-const editKey = (zettel, text) => `${zettel}\u0000${text}`;
+// Bearbeitbare Felder eines Zettels: content (Text), title (Titel), misc (Sonstige Vermerke)
+const editKey = (zettel, feld, text) => `${zettel}\u0000${feld}\u0000${text}`;
+
+function fieldText(entry, feld) {
+  if (feld === "title") return entry.title;
+  if (feld === "misc") return entry.misc ?? "";
+  return entry.text;
+}
 
 function entryById(id) {
   return state.entriesById.get(String(id)) || state.extra.get(String(id));
@@ -294,6 +305,8 @@ function updatePlace(entry, title) {
   hdrHeight();
 }
 
+const shownTitle = (entry) => entry.title || "(ohne Titel)";
+
 function navigate(step) {
   const entry = entryById(state.view?.id);
   if (!entry) return;
@@ -314,7 +327,23 @@ function desktopNote(entry) {
   return `<div class="pc"><b>Schreibtisch</b>${text}</div>`;
 }
 
-function headingHtml(entry, level) {
+// Zwei schräg versetzte Quadrate, das vordere verdeckt das hintere
+const COPY_ICON = '<svg class="symbol" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">'
+  + '<rect x="1.5" y="1.5" width="9" height="9" rx="1.6"/><rect x="5.5" y="5.5" width="9" height="9" rx="1.6"/></svg>';
+
+function toolbarHtml(label, edited) {
+  return `<div class="blk-tools"><span class="tag">${label}<span class="zustand">${edited ? " · bearbeitet" : ""}</span></span>`
+    + `<button class="tb" data-act="verwerfen"${edited ? "" : " hidden"}>Bearbeitung verwerfen</button></div>`;
+}
+
+function titleHtml(entry, tag, tools) {
+  const edited = state.edited.has(editKey(entry.id, "title", entry.title));
+  return `<div class="titelzeile"><div class="blk titel${edited ? " bearbeitet" : ""}" data-feld="title" data-s="0" data-e="${entry.title.length}">`
+    + `${tools ? toolbarHtml("Titel", edited) : ""}<${tag} class="text ed" contenteditable="true" spellcheck="true" data-leer="(ohne Titel)">${escapeHtml(entry.title)}</${tag}></div>`
+    + `<button type="button" class="kopieren" data-act="kopieren" title="Überschrift und Text kopieren (ohne Vermerke)" aria-label="Überschrift und Text kopieren">${COPY_ICON}</button></div>`;
+}
+
+function headingHtml(entry, level, tools) {
   const meta = [
     entry.pos ? sectionName(entry) : "nicht in der Anordnung",
     KIND_LABELS[entry.kind],
@@ -324,26 +353,38 @@ function headingHtml(entry, level) {
     entry.edited ? `geändert ${formatDate(entry.edited, false)}` : null,
   ].filter(Boolean).join(" · ");
   const tag = level === 1 ? "h2" : "h3";
-  const vermerke = entry.miscWords
-    ? `<details class="vermerke" data-id="${escapeHtml(entry.id)}"><summary>Sonstige Vermerke</summary><div class="vermerke-text"><p class="hint">Wird geladen …</p></div></details>`
-    : "";
-  return `<section class="blk kind-heading lvl-${level}"><span class="kap-ort">${escapeHtml(meta)}</span><${tag} class="text">${escapeHtml(entry.title)}</${tag}>${vermerke}${desktopNote(entry)}</section>`;
+  let vermerke = "";
+  if (entry.miscWords) {
+    // Aufgeklappt bleibt aufgeklappt, auch wenn das Kapitel neu gesetzt wird
+    const open = state.openMisc.has(entry.id);
+    const known = open && entry.misc !== undefined;
+    vermerke = `<details class="vermerke" data-id="${escapeHtml(entry.id)}" data-tools="${tools ? 1 : 0}"${open ? " open" : ""}${known ? ' data-geladen="1"' : ""}>`
+      + `<summary>Sonstige Vermerke</summary><div class="vermerke-text">${known ? miscHtml(entry, tools) : '<p class="hint">Wird geladen …</p>'}</div></details>`;
+  }
+  return `<section class="blk kind-heading lvl-${level}"><span class="kap-ort">${escapeHtml(meta)}</span>${titleHtml(entry, tag, tools)}${vermerke}${desktopNote(entry)}</section>`;
 }
 
-function blockHtml(entry, span, index, tools) {
-  const raw = entry.text.slice(span.start, span.end);
-  const { html, hits } = editableHtml(raw, { term: state.term, startIndex: hitCounter });
-  hitCounter += hits;
-  const edited = state.edited.has(editKey(entry.id, raw));
-  const toolbar = tools ? `<div class="blk-tools"><span class="tag">Absatz<span class="zustand">${edited ? " · bearbeitet" : ""}</span></span>`
-    + `<button class="tb" data-act="verwerfen"${edited ? "" : " hidden"}>Bearbeitung verwerfen</button></div>` : "";
-  return `<div class="blk absatz${edited ? " bearbeitet" : ""}" data-i="${index}" data-s="${span.start}" data-e="${span.end}">${toolbar}<div class="text ed" contenteditable="true" spellcheck="true">${html}</div></div>`;
+/** Ein bearbeitbarer Absatz des Textes (feld content) oder der Sonstigen Vermerke (feld misc). */
+function blockHtml(entry, feld, span, index, tools) {
+  const raw = fieldText(entry, feld).slice(span.start, span.end);
+  const misc = feld === "misc";
+  // Treffer in den Vermerken zählen nicht zu denen im Text (Sprung zum n-ten Treffer)
+  const { html, hits } = editableHtml(raw, { term: state.term, startIndex: misc ? 0 : hitCounter, markClass: misc ? "treffer-v" : "treffer" });
+  if (!misc) hitCounter += hits;
+  const edited = state.edited.has(editKey(entry.id, feld, raw));
+  return `<div class="blk ${misc ? "vermerk" : "absatz"}${edited ? " bearbeitet" : ""}" data-feld="${feld}" data-i="${index}" data-s="${span.start}" data-e="${span.end}">`
+    + `${tools ? toolbarHtml("Absatz", edited) : ""}<div class="text ed" contenteditable="true" spellcheck="true">${html}</div></div>`;
+}
+
+function miscHtml(entry, tools) {
+  const spans = paragraphSpans(entry.misc ?? "");
+  return spans.map((s, i) => blockHtml(entry, "misc", s, i, tools)).join("") || '<p class="hint">keine</p>';
 }
 
 function chapterHtml(entry, { level, tools }) {
   const spans = paragraphSpans(entry.text);
-  const blocks = spans.map((s, i) => blockHtml(entry, s, i, tools)).join("");
-  return headingHtml(entry, level) + (blocks || '<p class="leer">(Dieser Zettel hat noch keinen Text.)</p>');
+  const blocks = spans.map((s, i) => blockHtml(entry, "content", s, i, tools)).join("");
+  return headingHtml(entry, level, tools) + (blocks || '<p class="leer">(Dieser Zettel hat noch keinen Text.)</p>');
 }
 
 function navHtml(entry) {
@@ -362,6 +403,7 @@ function showChapter(id, { restore = null, toHit = true } = {}) {
   state.view = { mode: "kapitel", id: entry.id };
   hitCounter = 0;
   doc.innerHTML = `<div class="kapitel" data-zettel="${escapeHtml(entry.id)}">${chapterHtml(entry, { level: 1, tools: true })}</div>${navHtml(entry)}`;
+  loadOpenMisc();
   markCurrent(entry.id);
   updatePlace(entry);
   if (toHit && state.term && hitCounter) scrollToHit(state.hitIndex);
@@ -384,19 +426,34 @@ function scrollToHit(n) {
   mark.scrollIntoView({ block: "center" });
 }
 
-// Sonstige Vermerke (misc) erst beim Aufklappen laden
-doc.addEventListener("toggle", async (event) => {
-  const details = event.target;
-  if (!details.matches?.("details.vermerke") || !details.open || details.dataset.geladen) return;
+// Sonstige Vermerke (misc) erst beim Aufklappen laden – danach absatzweise beschreibbar wie der Text
+async function loadMisc(details) {
+  if (!details.open || details.dataset.geladen) return;
   details.dataset.geladen = "1";
   const box = $(".vermerke-text", details);
   try {
     const z = await quelle.zettel(details.dataset.id);
-    box.innerHTML = z.misc ? `<div class="text">${renderText(z.misc, { term: state.term }).html}</div>` : '<p class="hint">keine</p>';
+    const entry = containerEntry(details);
+    if (!entry || !details.isConnected) return;
+    entry.misc = z.misc;
+    entry.miscWords = z.miscWords;
+    box.innerHTML = miscHtml(entry, details.dataset.tools === "1");
   } catch (err) {
     box.innerHTML = `<p class="hint">${escapeHtml(err.message)}</p>`;
     delete details.dataset.geladen;
   }
+}
+
+function loadOpenMisc() {
+  for (const details of $$("details.vermerke[open]:not([data-geladen])", doc)) loadMisc(details);
+}
+
+doc.addEventListener("toggle", (event) => {
+  const details = event.target;
+  if (!details.matches?.("details.vermerke")) return;
+  if (details.open) state.openMisc.add(details.dataset.id);
+  else state.openMisc.delete(details.dataset.id);
+  loadMisc(details);
 }, true);
 
 // ------------------------------------------------------------------ Gesamtansicht
@@ -426,6 +483,7 @@ function showWhole(id, { offset = null } = {}) {
     parts.push(`<div class="kapitel" data-zettel="${escapeHtml(entry.id)}" style="content-visibility:auto;contain-intrinsic-size:auto ${estimateHeight(entry)}px">${chapterHtml(entry, { level: 2, tools: false })}</div>`);
   }
   doc.innerHTML = parts.join("");
+  loadOpenMisc();
   state.chapters = $$(".kapitel", doc);
   state.wholeKey = key;
   buildMiniToc(entries);
@@ -594,30 +652,75 @@ function setBlockState(block, status, detail = "") {
   if (zustand) zustand.textContent = label;
 }
 
+const chapterContainer = (id) => doc.querySelector(`.kapitel[data-zettel="${CSS.escape(String(id))}"]`);
+
+/** Lage der Absätze nach dem Speichern neu setzen; passt die Zahl nicht mehr, wird neu gesetzt (rerender). */
+function respan(box, feld, text, onMismatch) {
+  if (!box) return;
+  const spans = paragraphSpans(text);
+  const blocks = $$(`.blk[data-feld="${feld}"]`, box);
+  if (blocks.length !== spans.length) {
+    onMismatch();
+    return;
+  }
+  blocks.forEach((b, i) => {
+    b.dataset.s = spans[i].start;
+    b.dataset.e = spans[i].end;
+    const ed = $(".ed", b);
+    if (ed?._sitzung) ed._sitzung.start = spans[i].start;
+  });
+}
+
 function updateEntryText(entry, text) {
   if (entry.text === text) return;
   entry.text = text;
   entry.words = countWords(text);
   state.wholeKey = null;
-  const container = doc.querySelector(`.kapitel[data-zettel="${CSS.escape(entry.id)}"]`);
-  if (!container) return;
-  const spans = paragraphSpans(text);
-  const blocks = $$(".blk.absatz", container);
-  if (blocks.length === spans.length) {
-    blocks.forEach((b, i) => {
-      b.dataset.s = spans[i].start;
-      b.dataset.e = spans[i].end;
-    });
-    for (const ed of $$(".ed", container)) if (ed._sitzung) ed._sitzung.start = Number(ed.closest(".blk").dataset.s);
-  } else {
-    state.rerender.add(entry.id);
+  respan(chapterContainer(entry.id), "content", text, () => state.rerender.add(entry.id));
+}
+
+function updateMisc(entry, text) {
+  if (entry.misc === text) return;
+  entry.misc = text;
+  entry.miscWords = countWords(text);
+  state.wholeKey = null;
+  respan(chapterContainer(entry.id)?.querySelector("details.vermerke .vermerke-text"), "misc", text,
+    () => state.rerenderMisc.add(entry.id));
+}
+
+/** Neuer Titel: Inhaltsverzeichnis, Übersicht und Kopfzeile ziehen mit (die Art – Szene usw. – hängt am Titel). */
+function updateTitle(entry, text) {
+  if (entry.title === text) return;
+  const kind = kindOf(text);
+  const same = state.book ? state.book.entries.filter((e) => e.id === entry.id) : [];
+  for (const e of new Set([entry, ...same])) {
+    e.title = text;
+    e.kind = kind;
   }
+  state.wholeKey = null;
+  for (const block of $$(`.kapitel[data-zettel="${CSS.escape(entry.id)}"] .blk[data-feld="title"]`, doc)) block.dataset.e = text.length;
+  if (same.length) {
+    buildToc();
+    for (const link of $$(`a[data-id="${CSS.escape(entry.id)}"]`, mini)) {
+      link.textContent = text;
+      link.title = text;
+      link.classList.remove("art-szene", "art-jahr", "art-sonstiges");
+      link.classList.add(`art-${kind}`);
+    }
+  }
+  if (String(state.view?.id) === entry.id) updatePlace(entry.pos ? entry : null, shownTitle(entry));
+}
+
+function updateField(entry, feld, text) {
+  if (feld === "title") updateTitle(entry, text);
+  else if (feld === "misc") updateMisc(entry, text);
+  else updateEntryText(entry, text);
 }
 
 function rememberEdit(session, nachher) {
   // session.erst: Wortlaut vor der ersten Bearbeitung; session.shown: zuletzt gespeicherter Wortlaut
-  state.edited.delete(editKey(session.zettel, session.shown));
-  if (nachher !== session.erst) state.edited.set(editKey(session.zettel, nachher), session.erst);
+  state.edited.delete(editKey(session.zettel, session.feld, session.shown));
+  if (nachher !== session.erst) state.edited.set(editKey(session.zettel, session.feld, nachher), session.erst);
   session.shown = nachher;
   return nachher !== session.erst;
 }
@@ -636,12 +739,17 @@ function handleSaveResult(entry, block, session, nachher, result) {
     toast("Speichern ist fehlgeschlagen", result.meldung || "", 10000);
     return;
   }
-  if (typeof result.text === "string") updateEntryText(entry, result.text);
+  if (typeof result.text === "string") updateField(entry, session.feld, result.text);
   const marked = rememberEdit(session, nachher);
   if (block?.isConnected) {
     block.classList.toggle("bearbeitet", marked);
     const discard = $('[data-act="verwerfen"]', block);
     if (discard) discard.hidden = !marked;
+    // Ein fertiger Titel steht so da, wie er gespeichert ist (eine Zeile, ohne Leerraum am Rand)
+    const ed = $(".ed", block);
+    if (session.feld === "title" && session.fertig && ed && document.activeElement !== ed && ed.textContent !== entry.title) {
+      ed.textContent = entry.title;
+    }
   }
   const outcome = result.einspielen?.status;
   if (outcome === "wartet") setBlockState(block, "wartet");
@@ -665,7 +773,16 @@ function save(ed, fertig) {
   const block = ed.closest(".blk");
   const run = async () => {
     const entry = entryById(session.zettel);
-    const nachher = cleanText(domToText(ed));
+    let nachher = cleanText(domToText(ed));
+    if (session.feld === "title") {
+      nachher = titelZeile(nachher);
+      if (!nachher) {
+        if (!fertig) return; // ein leerer Titel wird nicht gespeichert
+        ed.textContent = session.shown; // zurück zum zuletzt gespeicherten Titel
+        nachher = session.shown;
+        if (session.shown) toast("Ein Titel darf nicht leer sein", "Der bisherige Titel bleibt stehen.", 5000);
+      }
+    }
     if (!session.sent && nachher === session.original) {
       setBlockState(block, null);
       return;
@@ -677,7 +794,7 @@ function save(ed, fertig) {
     state.saving += 1;
     try {
       const result = await quelle.aendern({
-        zettel: session.zettel, start: session.start, vorher: session.original, nachher,
+        zettel: session.zettel, feld: session.feld, start: session.start, vorher: session.original, nachher,
         sitzung: session.id, fertig,
       });
       handleSaveResult(entry, block, session, nachher, result);
@@ -703,6 +820,12 @@ function afterEditing() {
     else if (state.view?.mode === "zettel" && ids.includes(String(state.view.id))) showZettel(state.view.id, { restore: y });
     window.scrollTo(0, y);
   }
+  for (const id of state.rerenderMisc) {
+    const entry = entryById(id);
+    const details = chapterContainer(id)?.querySelector("details.vermerke[data-geladen]");
+    if (entry && details) $(".vermerke-text", details).innerHTML = miscHtml(entry, details.dataset.tools === "1");
+  }
+  state.rerenderMisc.clear();
   if (state.reloadWanted && !state.saving) {
     state.reloadWanted = false;
     poll();
@@ -715,6 +838,7 @@ function replaceWholeChapter(id) {
   if (!entry || !container) return;
   hitCounter = 0;
   container.innerHTML = chapterHtml(entry, { level: 2, tools: false });
+  loadOpenMisc();
 }
 
 doc.addEventListener("focusin", (event) => {
@@ -722,11 +846,14 @@ doc.addEventListener("focusin", (event) => {
   if (!ed || ed._sitzung) return;
   const block = ed.closest(".blk");
   const entry = containerEntry(ed);
-  if (!entry) return;
-  const text = cleanText(domToText(ed));
-  ed._sitzung = { id: uid(), zettel: entry.id, original: text, start: Number(block.dataset.s), sent: false,
-    shown: text, erst: state.edited.get(editKey(entry.id, text)) ?? text };
+  if (!entry || !block) return;
+  const feld = block.dataset.feld || "content";
+  const text = feld === "title" ? entry.title : cleanText(domToText(ed));
+  ed._sitzung = { id: uid(), zettel: entry.id, feld, original: text, start: Number(block.dataset.s), sent: false,
+    shown: text, erst: state.edited.get(editKey(entry.id, feld, text)) ?? text };
 });
+
+const isTitle = (ed) => ed.closest(".blk")?.dataset.feld === "title";
 
 doc.addEventListener("input", (event) => {
   const ed = event.target.closest?.(".ed");
@@ -746,12 +873,10 @@ doc.addEventListener("focusout", (event) => {
 doc.addEventListener("keydown", (event) => {
   const ed = event.target.closest?.(".ed");
   if (!ed) return;
-  if (event.key === "Enter" && event.shiftKey) {
+  if (event.key === "Enter" && !event.isComposing) {
     event.preventDefault();
-    ed.blur(); // Umschalt+Enter beendet die Eingabe
-  } else if (event.key === "Enter" && !event.isComposing) {
-    event.preventDefault();
-    insertText("\n"); // Enter: neue Zeile (zweimal: neuer Absatz)
+    if (isTitle(ed)) ed.blur(); // ein Titel ist eine Zeile: Enter beendet die Eingabe
+    else insertText(event.shiftKey ? "\n\n" : "\n"); // Enter: neue Zeile, Umschalt+Enter: neuer Absatz
   } else if (event.key === "Escape") {
     event.preventDefault();
     ed.blur();
@@ -761,9 +886,11 @@ doc.addEventListener("keydown", (event) => {
 }, true);
 
 doc.addEventListener("paste", (event) => {
-  if (!event.target.closest?.(".ed")) return;
+  const ed = event.target.closest?.(".ed");
+  if (!ed) return;
   event.preventDefault();
-  insertText((event.clipboardData?.getData("text/plain") || "").replace(/\r\n?/g, "\n"));
+  const text = (event.clipboardData?.getData("text/plain") || "").replace(/\r\n?/g, "\n");
+  insertText(isTitle(ed) ? text.replace(/\s*\n\s*/g, " ") : text);
 });
 
 doc.addEventListener("drop", (event) => {
@@ -775,9 +902,10 @@ window.addEventListener("pagehide", () => {
   for (const ed of $$(".ed")) {
     const session = ed._sitzung;
     if (!session) continue;
-    const nachher = cleanText(domToText(ed));
+    let nachher = cleanText(domToText(ed));
+    if (session.feld === "title") nachher = titelZeile(nachher) || session.shown;
     if (nachher === session.original && !session.sent) continue;
-    bodies.push({ zettel: session.zettel, start: session.start, vorher: session.original, nachher,
+    bodies.push({ zettel: session.zettel, feld: session.feld, start: session.start, vorher: session.original, nachher,
       sitzung: session.id, fertig: true });
   }
   if (bodies.length && quelle) quelle.verlassen(bodies);
@@ -785,11 +913,12 @@ window.addEventListener("pagehide", () => {
 
 async function discardEdit(entry, block) {
   const ed = $(".ed", block);
-  const current = entry.text.slice(Number(block.dataset.s), Number(block.dataset.e));
-  const original = state.edited.get(editKey(entry.id, current));
+  const feld = block.dataset.feld || "content";
+  const current = feld === "title" ? entry.title : fieldText(entry, feld).slice(Number(block.dataset.s), Number(block.dataset.e));
+  const original = state.edited.get(editKey(entry.id, feld, current));
   if (original === undefined || !ed) return;
   try {
-    const result = await quelle.aendern({ zettel: entry.id, start: Number(block.dataset.s), vorher: current,
+    const result = await quelle.aendern({ zettel: entry.id, feld, start: Number(block.dataset.s), vorher: current,
       nachher: original, sitzung: uid(), fertig: true });
     if (result.status === "konflikt" || result.status === "fehler") {
       toast("Verwerfen ging nicht", result.meldung || "", 9000);
@@ -797,23 +926,73 @@ async function discardEdit(entry, block) {
     }
     if (result.stand || result.version) state.version = result.stand || result.version;
     if (result.bearbeitung) updateEditStatus(result.bearbeitung);
-    state.edited.delete(editKey(entry.id, current));
-    if (typeof result.text === "string") updateEntryText(entry, result.text);
-    if (state.rerender.has(entry.id)) {
+    state.edited.delete(editKey(entry.id, feld, current));
+    if (typeof result.text === "string") updateField(entry, feld, result.text);
+    if (state.rerender.has(entry.id) || state.rerenderMisc.has(entry.id)) {
       afterEditing();
     } else {
-      ed.innerHTML = editableHtml(original).html;
+      if (feld === "title") ed.textContent = original;
+      else ed.innerHTML = editableHtml(original).html;
       block.classList.remove("bearbeitet");
       $('[data-act="verwerfen"]', block).hidden = true;
       setBlockState(block, null);
     }
-    toast("Bearbeitung verworfen", "Der Absatz steht wieder wie vorher.");
+    toast("Bearbeitung verworfen", feld === "title" ? "Der Titel steht wieder wie vorher." : "Der Absatz steht wieder wie vorher.");
   } catch (err) {
     toast("Verwerfen ging nicht", err.message, 9000);
   }
 }
 
+/** Was „Kopieren“ in die Zwischenablage legt: Überschrift und Text, so wie sie dastehen – ohne Vermerke und Angaben. */
+function copyText(container) {
+  const title = titelZeile(domToText($('.blk[data-feld="title"] .ed', container)));
+  const paragraphs = $$('.blk[data-feld="content"] .ed', container).map((ed) => cleanText(domToText(ed))).filter((p) => p.trim());
+  return [title, ...paragraphs].filter(Boolean).join("\n\n");
+}
+
+async function toClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    // ältere Browser oder keine Erlaubnis: über ein unsichtbares Textfeld
+    const area = document.createElement("textarea");
+    area.value = text;
+    area.setAttribute("readonly", "");
+    area.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0";
+    document.body.append(area);
+    area.select();
+    let ok = false;
+    try {
+      ok = document.execCommand("copy");
+    } catch {
+      ok = false;
+    }
+    area.remove();
+    return ok;
+  }
+}
+
+async function copyChapter(button) {
+  const container = button.closest(".kapitel");
+  if (!container) return;
+  const text = copyText(container);
+  if (await toClipboard(text)) {
+    button.classList.add("kopiert");
+    setTimeout(() => button.classList.remove("kopiert"), 1500);
+    const title = text.split("\n", 1)[0];
+    toast("Kopiert", `„${title.length > 60 ? `${title.slice(0, 60)} …` : title}“ – Überschrift und Text, ${formatNumber(countWords(text))} Wörter`);
+  } else {
+    toast("Kopieren ging nicht", "Der Browser hat den Zugriff auf die Zwischenablage verweigert.", 8000);
+  }
+}
+
 doc.addEventListener("click", (event) => {
+  const copy = event.target.closest('[data-act="kopieren"]');
+  if (copy) {
+    copyChapter(copy);
+    return;
+  }
   const button = event.target.closest('[data-act="verwerfen"]');
   if (!button) return;
   const entry = containerEntry(button);
@@ -920,7 +1099,7 @@ insp.addEventListener("click", (event) => {
 
 function removeMarks() {
   // Markierungen direkt entfernen – auch in einem Absatz, in dem gerade geschrieben wird
-  for (const mark of $$("mark.treffer", doc)) {
+  for (const mark of $$("mark.treffer, mark.treffer-v", doc)) {
     const parent = mark.parentNode;
     mark.replaceWith(...mark.childNodes);
     parent.normalize();
@@ -961,7 +1140,8 @@ function changeItem(change, actions) {
   const when = change.eingespielt || change.geaendert || change.erstellt;
   const buttons = actions.map(([action, label]) => `<button class="tb" data-aktion="${action}" data-id="${escapeHtml(change.id)}">${label}</button>`).join("");
   const herkunft = change.unterwegs ? ` · ${change.geraet === "Chromebook" ? "vom Chromebook" : "von unterwegs"}` : "";
-  return `<li><div class="wo">${escapeHtml(formatDate(when))}${herkunft} · <a href="#kapitel/${escapeHtml(change.zettel)}">${escapeHtml(change.titel || `Zettel ${change.zettel}`)}</a>${change.grund ? ` · ${escapeHtml(change.grund)}` : ""}</div>`
+  const feld = { title: " · Titel", misc: " · Sonstige Vermerke" }[change.feld] || "";
+  return `<li><div class="wo">${escapeHtml(formatDate(when))}${herkunft} · <a href="#kapitel/${escapeHtml(change.zettel)}">${escapeHtml(change.titel || `Zettel ${change.zettel}`)}</a>${feld}${change.grund ? ` · ${escapeHtml(change.grund)}` : ""}</div>`
     + `<span class="vorher">${escapeHtml(change.vorher || "")}</span><span class="nachher">${escapeHtml(change.nachher || "(gelöscht)")}</span>${buttons}</li>`;
 }
 
@@ -1049,13 +1229,14 @@ async function showZettel(id, { restore = null } = {}) {
   doc.innerHTML = '<p class="leer">Wird geladen …</p>';
   try {
     const z = await quelle.zettel(id);
-    const entry = { id: z.id, title: z.title || "(ohne Titel)", text: z.content, kind: z.kind, words: z.words,
+    const entry = { id: z.id, title: z.title, text: z.content, misc: z.misc, kind: z.kind, words: z.words,
       miscWords: z.miscWords, edited: z.edited, pos: null, section: null, desktop: null, comment: "" };
     state.extra.set(entry.id, entry);
-    updatePlace(null, entry.title);
+    updatePlace(null, shownTitle(entry));
     markCurrent(null);
     hitCounter = 0;
     doc.innerHTML = `<div class="kapitel" data-zettel="${escapeHtml(entry.id)}">${chapterHtml(entry, { level: 1, tools: true })}</div>`;
+    loadOpenMisc();
     if (state.term && hitCounter && restore === null) scrollToHit(state.hitIndex);
     else window.scrollTo(0, restore ?? 0);
   } catch (err) {
@@ -1080,6 +1261,7 @@ function updateEditStatus(b) {
   else if (b.offen) { text = `${n(b.offen, "Änderung wird", "Änderungen werden")} gleich eingespielt`; cls = "offen"; }
   el.className = `speicherstand ${cls}`;
   el.innerHTML = text ? `<a href="#" data-oeffnet="1" id="zu-aenderungen">${escapeHtml(text)}</a>` : "";
+  el.parentElement.hidden = !text; // die Zeile erscheint nur, wenn es etwas zu melden gibt
   hdrHeight();
 }
 

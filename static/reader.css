@@ -79,15 +79,15 @@ a{color:var(--accent)}
 #doc{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:1.6rem 2rem 2rem;margin-top:1rem}
 .blk{position:relative;margin:0 0 1.1rem}
 .blk-tools{display:flex;flex-wrap:wrap;gap:.3rem;align-items:center;justify-content:flex-end;margin:0 0 .25rem;opacity:0;transition:opacity .15s;font-size:.75rem}
-.blk:hover .blk-tools,.blk:focus-within .blk-tools,.blk.has-dec .blk-tools{opacity:1}
+.blk:hover > .blk-tools,.blk:focus-within > .blk-tools,.blk.has-dec > .blk-tools{opacity:1}
 .blk-tools .tag{color:var(--muted);margin-right:auto;font-size:.72rem}
 .blk-tools .tb{border:1px solid var(--line);background:transparent;border-radius:6px;padding:.1rem .45rem;font-size:.74rem}
 .blk-tools .tb:hover{border-color:var(--accent);color:var(--accent)}
 .text{font-family:var(--serif);font-size:1.08rem;line-height:1.62;text-align:left;hyphens:auto;-webkit-hyphens:auto}
 .text p{margin:0}
-.kind-heading > .text{font-size:1.18rem;font-weight:600;margin:.3rem 0 .5rem}
-.kind-heading.lvl-1 > .text{font-size:1.7rem;margin-top:1.2rem}
-.kind-heading.lvl-2 > .text{font-size:1.38rem;margin-top:.9rem}
+.kind-heading .titel > .text{font-size:1.18rem;font-weight:600;margin:.3rem -.3rem .5rem}
+.kind-heading.lvl-1 .titel > .text{font-size:1.7rem;margin-top:1.2rem}
+.kind-heading.lvl-2 .titel > .text{font-size:1.38rem;margin-top:.9rem}
 .pc{font-family:var(--sans);font-size:.84rem;background:var(--pc-bg);border-left:3px solid var(--pc-line);border-radius:0 8px 8px 0;padding:.45rem .7rem;margin:.45rem 0 0}
 .pc b{font-size:.72rem;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);margin-right:.35rem}
 .ed{outline:none;border-radius:6px;padding:.1rem .3rem;margin:0 -.3rem;caret-color:var(--accent);min-height:1.5em;cursor:text}
@@ -133,12 +133,26 @@ body.nur-szenen .toc-jahr li.art-jahr,body.nur-szenen .toc-jahr li.art-sonstiges
 @media (min-width:1100px){ body.inhalt-offen .wrap{margin-left:max(20rem,calc((100vw - 50rem) / 2))} }
 @media (max-width:1099px){ body.inhalt-offen .inhalt{box-shadow:var(--shadow)} }
 
-/* Sonstige Vermerke (misc) unter dem Kapiteltitel, aufklappbar */
+/* Titelzeile: der Titel ist beschreibbar, rechts daneben das Kopiersymbol */
+.titelzeile{display:flex;align-items:flex-start;gap:.6rem}
+.titelzeile > .blk.titel{flex:1;min-width:0;margin:0}
+.blk.titel .ed:empty::before{content:attr(data-leer);color:var(--muted);font-weight:400}
+.kopieren{flex:none;display:inline-flex;align-items:center;justify-content:center;width:1.9rem;height:1.9rem;padding:0;border:1px solid transparent;border-radius:7px;background:transparent;color:var(--muted)}
+.kopieren:hover,.kopieren:focus-visible{color:var(--accent);border-color:var(--line);background:var(--surface-2)}
+.kopieren.kopiert{color:var(--ins-ink)}
+.kopieren .symbol rect{fill:var(--surface);stroke:currentColor;stroke-width:1.3}
+.kopieren:hover .symbol rect,.kopieren:focus-visible .symbol rect{fill:var(--surface-2)}
+.lvl-1 .titelzeile > .kopieren{margin-top:1.6rem}
+.lvl-2 .titelzeile > .kopieren{margin-top:1.15rem}
+
+/* Sonstige Vermerke (misc) unter dem Kapiteltitel, aufklappbar und absatzweise beschreibbar */
 details.vermerke{margin:.5rem 0 .2rem;font-family:var(--sans)}
 details.vermerke > summary{cursor:pointer;font-size:.8rem;color:var(--accent);width:max-content}
-.vermerke-text{margin-top:.5rem;max-height:60vh;overflow:auto;border:1px solid var(--pc-line);background:var(--pc-bg);border-radius:8px;padding:.6rem .8rem}
+.vermerke-text{margin-top:.5rem;max-height:60vh;overflow:auto;border:1px solid var(--pc-line);background:var(--pc-bg);border-radius:8px;padding:.6rem .8rem .6rem 1.2rem}
+.vermerke-text:has(.blk-tools){padding-top:1.5rem}
 .vermerke-text .text{font-size:.98rem;font-weight:400}
-.vermerke-text .text p{margin:0 0 .6rem}
+.vermerke-text .blk.vermerk{margin:0 0 .7rem}
+.vermerke-text .blk.vermerk:last-child{margin-bottom:0}
 
 /* Kapitel, Abschnitte, Absätze */
 .kap-ort{font-family:var(--sans);font-size:.72rem;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);display:block}
@@ -162,10 +176,13 @@ body.mit-nummern .blk.absatz::before{content:counter(abs);position:absolute;left
 .blk .zustand{font-size:.72rem;color:var(--muted)}
 .blk.konflikt .zustand{color:var(--del-ink);font-weight:600}
 /* Werkzeuge eines Absatzes schweben über ihm, statt Platz zu belegen (kurze Absätze stehen sonst weit auseinander) */
-.blk.absatz > .blk-tools{position:absolute;right:0;top:-1.3rem;margin:0;z-index:2;background:var(--surface);border-radius:6px;padding:0 .15rem;pointer-events:none}
-.blk.absatz:hover > .blk-tools,.blk.absatz:focus-within > .blk-tools{pointer-events:auto}
-.blk.absatz > .blk-tools .tag{margin-right:.4rem}
-.blk.absatz.wartet > .blk-tools,.blk.absatz.konflikt > .blk-tools{opacity:1}
+.blk:is(.absatz,.vermerk,.titel) > .blk-tools{position:absolute;right:0;top:-1.3rem;margin:0;z-index:2;background:var(--surface);border-radius:6px;padding:0 .15rem;pointer-events:none}
+.blk.vermerk > .blk-tools{background:var(--pc-bg)}
+.blk.titel > .blk-tools{top:.1rem}
+.blk:is(.absatz,.vermerk,.titel):hover > .blk-tools,.blk:is(.absatz,.vermerk,.titel):focus-within > .blk-tools{pointer-events:auto}
+.blk:is(.absatz,.vermerk,.titel) > .blk-tools .tag{margin-right:.4rem}
+.blk:is(.absatz,.vermerk,.titel):is(.wartet,.konflikt) > .blk-tools{opacity:1}
+mark.treffer-v{background:var(--mark-bg);color:inherit;border-radius:2px}
 
 .kap-nav{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-top:2.4rem}
 .kap-nav a{display:block;text-decoration:none;color:var(--ink);border:1px solid var(--line);border-radius:10px;padding:.55rem .8rem;background:var(--bg)}
@@ -246,7 +263,7 @@ body[data-einrichten="1"] .wrap{margin-left:auto!important}
   body.mit-nummern .blk.absatz::before{display:none}
 }
 @media print{
-  .bar,.inhalt,.insp,.blk-tools,.toast,.minitoc,.kap-nav,details.vermerke{display:none!important}
+  .bar,.inhalt,.insp,.blk-tools,.toast,.minitoc,.kap-nav,details.vermerke,.kopieren{display:none!important}
   body{background:#fff}
   #doc{border:0}
 }

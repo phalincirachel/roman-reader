@@ -5,7 +5,7 @@
 // eingespielt sind, steht in aenderungsbuch/unterwegs.json; diese Datei kommt mit „Sichern“
 // zusammen mit der zkn3 auf GitHub. So passen zkn3 und Rückmeldung immer zueinander.
 import { leseZkn3, materialListe, materialTitel } from "./zkn3.js";
-import { Konflikt, applyChange, applyList, locate, mergeQueue, normalizeNachher, parseQueue, queueText } from "./aenderung.js";
+import { FELDER, Konflikt, applyChange, applyList, cleanNachher, feldVon, locateIn, mergeQueue, parseQueue, queueText } from "./aenderung.js";
 
 const ZWEIG = "unterwegs";
 const DATEI = "aenderungen.json";
@@ -296,24 +296,26 @@ export function githubQuelle({ apiBase, test = false }) {
     ];
   }
 
+  /** Felder mit offenen Änderungen: Zettel -> { Feld: Text } (wie Werkstatt.overlay auf dem Laptop). */
   function overlay() {
     const groups = new Map();
     for (const change of offene()) {
-      const zettel = String(change.zettel);
-      if (!groups.has(zettel)) groups.set(zettel, []);
-      groups.get(zettel).push(change);
+      const key = `${change.zettel}\u0000${feldVon(change)}`;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(change);
     }
     const result = {};
     s.konflikte = new Map();
-    for (const [zettel, list] of groups) {
-      const base = s.modell.byId.get(zettel)?.content;
-      if (base === undefined) {
-        for (const change of list) s.konflikte.set(change.id, `Zettel ${zettel} gibt es nicht.`);
+    for (const [key, list] of groups) {
+      const [zettel, feld] = key.split("\u0000");
+      const z = s.modell.byId.get(zettel);
+      if (!z || !FELDER.includes(feld)) {
+        for (const change of list) s.konflikte.set(change.id, z ? `Das Feld „${feld}“ lässt sich nicht bearbeiten.` : `Zettel ${zettel} gibt es nicht.`);
         continue;
       }
-      const { text, konflikte, applied } = applyList(base, list);
+      const { text, konflikte, applied } = applyList(z[feld], list);
       for (const [id, grund] of konflikte) s.konflikte.set(id, grund);
-      if (applied) result[zettel] = text;
+      if (applied) (result[zettel] ??= {})[feld] = text;
     }
     return result;
   }
@@ -346,27 +348,29 @@ export function githubQuelle({ apiBase, test = false }) {
   }
 
   /** Nimmt eine Bearbeitung an (wie Werkstatt.record auf dem Laptop), noch ohne Hochladen. */
-  function erfasse({ zettel, start, vorher, nachher, sitzung, fertig }) {
+  function erfasse({ zettel, feld = "content", start, vorher, nachher, sitzung, fertig }) {
     const id = String(zettel);
     const z = s.modell?.byId.get(id);
     if (!z) return { status: "fehler", meldung: `Zettel ${id} gibt es nicht.` };
+    if (!FELDER.includes(feld)) return { status: "fehler", meldung: `Das Feld „${feld}“ lässt sich nicht bearbeiten.` };
     const own = s.lokal.find((e) => e.sitzung === sitzung);
-    const { text } = applyList(z.content, offene().filter((e) => e !== own && String(e.zettel) === id));
+    const { text } = applyList(z[feld], offene().filter((e) => e !== own && String(e.zettel) === id && feldVon(e) === feld));
     let pos;
     try {
-      pos = locate(text, vorher, Number.isInteger(start) ? start : -1);
+      pos = locateIn(feld, text, vorher, Number.isInteger(start) ? start : -1);
     } catch (err) {
       if (!(err instanceof Konflikt)) throw err;
       return { status: "konflikt", meldung: err.message, text };
     }
-    const clean = normalizeNachher(nachher);
+    const clean = cleanNachher(feld, nachher);
+    if (feld === "title" && !clean) return { status: "fehler", meldung: "Ein Titel darf nicht leer sein.", text };
     if (own) s.lokal.splice(s.lokal.indexOf(own), 1);
     if (clean === vorher) {
       speichereLokal();
       return { status: "unveraendert", text };
     }
-    const entry = own || { id: neueId(), sitzung, zettel: id, erstellt: ortsZeit(new Date()), geraet: GERAET, wer: "du",
-      basis: s.modell.version };
+    const entry = own || { id: neueId(), sitzung, zettel: id, ...(feld === "content" ? {} : { feld }), erstellt: ortsZeit(new Date()),
+      geraet: GERAET, wer: "du", basis: s.modell.version };
     Object.assign(entry, { titel: z.title, vorher, nachher: clean, start: pos, geaendert: ortsZeit(new Date()), fertig: Boolean(fertig) });
     s.lokal.push(entry);
     speichereLokal();

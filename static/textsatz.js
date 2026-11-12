@@ -52,11 +52,14 @@ export function paragraphSpans(text) {
   return spans;
 }
 
-/** Inhalt eines bearbeitbaren Absatzes (Zeilenumbrüche bleiben \n; white-space: pre-wrap). */
-export function editableHtml(text, { term = "", startIndex = 0 } = {}) {
+/**
+ * Inhalt eines bearbeitbaren Absatzes (Zeilenumbrüche bleiben \n; white-space: pre-wrap).
+ * markClass: Klasse der Suchmarkierungen (die Vermerke zählen nicht zu den Treffern im Text).
+ */
+export function editableHtml(text, { term = "", startIndex = 0, markClass = "treffer" } = {}) {
   let hits = 0;
   const lines = String(text).split("\n").map((line) => {
-    const result = highlightLine(line, term, startIndex + hits);
+    const result = highlightLine(line, term, startIndex + hits, markClass);
     hits += result.count;
     return markAnnotations(result.html);
   });
@@ -103,7 +106,7 @@ function termRegExp(term) {
 }
 
 /** Maskiert eine Zeile und markiert dabei Suchtreffer (ohne Groß-/Kleinschreibung). */
-export function highlightLine(line, term, startIndex = 0) {
+export function highlightLine(line, term, startIndex = 0, markClass = "treffer") {
   if (!term) return { html: escapeHtml(line), count: 0 };
   const re = termRegExp(term);
   let html = "";
@@ -116,7 +119,7 @@ export function highlightLine(line, term, startIndex = 0) {
       continue;
     }
     html += escapeHtml(line.slice(last, m.index));
-    html += `<mark class="treffer" data-n="${startIndex + count}">${escapeHtml(m[0])}</mark>`;
+    html += `<mark class="${markClass}" data-n="${startIndex + count}">${escapeHtml(m[0])}</mark>`;
     count += 1;
     last = m.index + m[0].length;
   }

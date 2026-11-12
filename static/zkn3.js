@@ -280,10 +280,14 @@ export class Buch {
     const authors = numberedEntries(parseXml(parts["authorFile.xml"] || "", "authorFile.xml"));
     const zknRoot = parseXml(parts["zknFile.xml"] || "", "zknFile.xml");
     if (!zknRoot) throw new Error("In der zkn3 fehlt zknFile.xml.");
+    // Text und Vermerke ohne Kürzen (Positionen darin gelten beim Schreiben), der Titel wie bei zkn.py
+    const exact = (element, name) => {
+      const item = child(element, name);
+      return item ? item.textContent.replaceAll("[br]", "\n") : "";
+    };
     this.zettels = all(zknRoot, "zettel").map((element, index) => {
-      const contentElement = child(element, "content");
-      const content = contentElement ? contentElement.textContent.replaceAll("[br]", "\n") : "";
-      const misc = childText(element, "misc");
+      const content = exact(element, "content");
+      const misc = exact(element, "misc");
       return {
         id: String(index + 1),
         title: childText(element, "title"),
@@ -351,12 +355,13 @@ export class Buch {
     walk(desktop, 0, null);
   }
 
-  /** Wie Book.book_payload: overlay = Zettelnummer -> Anzeigetext mit offenen Änderungen. */
+  /** Wie Book.book_payload: overlay = Zettelnummer -> { Feld: Anzeigetext mit offenen Änderungen }. */
   bookPayload(overlay = {}) {
     const entries = this.entries.map((entry) => {
-      const zettel = this.byId.get(entry.id);
+      const offen = Object.hasOwn(overlay, entry.id) ? overlay[entry.id] : {};
+      const zettel = this.byId.get(entry.id) ? { ...this.byId.get(entry.id), ...offen } : null;
       const title = zettel?.title || `(Zettel ${entry.id} fehlt)`;
-      const text = Object.hasOwn(overlay, entry.id) ? overlay[entry.id] : zettel?.content ?? "";
+      const text = zettel?.content ?? "";
       return {
         pos: entry.pos,
         id: entry.id,
@@ -365,8 +370,8 @@ export class Buch {
         section: entry.section,
         words: countWords(text),
         text,
-        pending: Object.hasOwn(overlay, entry.id),
-        miscWords: zettel?.miscWords ?? 0,
+        pending: Object.keys(offen).length > 0,
+        miscWords: Object.hasOwn(offen, "misc") ? countWords(zettel.misc) : zettel?.miscWords ?? 0,
         created: zettel?.created ?? null,
         edited: zettel?.edited ?? null,
         comment: entry.comment,
@@ -394,7 +399,11 @@ export class Buch {
   zettelPayload(id, overlay = {}) {
     let zettel = this.byId.get(String(id));
     if (!zettel) return null;
-    if (Object.hasOwn(overlay, zettel.id)) zettel = { ...zettel, content: overlay[zettel.id], words: countWords(overlay[zettel.id]) };
+    if (Object.hasOwn(overlay, zettel.id) && Object.keys(overlay[zettel.id]).length) {
+      zettel = { ...zettel, ...overlay[zettel.id] };
+      zettel.words = countWords(zettel.content);
+      zettel.miscWords = countWords(zettel.misc);
+    }
     const ref = (target) => ({ id: target, title: this.byId.get(target)?.title ?? null, pos: this.firstPos.get(target) ?? null });
     return {
       id: zettel.id, title: zettel.title, content: zettel.content, misc: zettel.misc, keywords: zettel.keywords,

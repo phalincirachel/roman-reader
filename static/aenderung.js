@@ -1,13 +1,34 @@
 // Regeln für das Ändern eines Absatzes – dieselben wie in reader/schreiben.py (locate,
 // apply_change). Positionen zählen hier in UTF-16-Einheiten, wie der Browser zählt;
 // der Laptop rechnet sie beim Übernehmen um (schreiben.js_offset).
-import { hasText, stripNewlines } from "./pytext.js";
+// Bearbeitet werden Text (content) und Sonstige Vermerke (misc) absatzweise, der Titel (title)
+// als Ganzes. Eine Änderung ohne „feld“ betrifft den Text.
+import { PY_WS, hasText, pyStrip, stripNewlines } from "./pytext.js";
+
+export const FELDER = ["content", "title", "misc"];
+const TITEL_UMBRUCH_RE = new RegExp(`[${PY_WS}]*\\n[${PY_WS}]*`, "gu");
 
 export class Konflikt extends Error {
   constructor(message) {
     super(message);
     this.name = "Konflikt";
   }
+}
+
+export const feldVon = (change) => change?.feld || "content";
+
+/** Ein Titel ist eine Zeile (wie schreiben.titel_zeile). */
+export function titelZeile(text) {
+  return pyStrip(String(text ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(TITEL_UMBRUCH_RE, " "));
+}
+
+/** Wie locate; beim Titel muss `vorher` der ganze bisherige Titel sein. */
+export function locateIn(feld, text, vorher, hint = -1) {
+  if (feld === "title") {
+    if (text !== vorher) throw new Konflikt("Der Titel wurde inzwischen anderswo geändert.");
+    return 0;
+  }
+  return locate(text, vorher, hint);
 }
 
 /** Position, an der `vorher` als ganzer Absatz im Text steht (hint: vermutete Position). */
@@ -34,9 +55,21 @@ export function normalizeNachher(nachher) {
   return stripNewlines(String(nachher ?? "").replace(/\r\n/g, "\n").replace(/\r/g, "\n"));
 }
 
-/** Neuer Anzeigetext; ein geleerter Absatz verschwindet samt Leerzeilen. */
+/** Neuer Wortlaut des Feldes: wie beim Einspielen (Titel als eine Zeile, sonst ohne Leerzeilen am Rand). */
+export function cleanNachher(feld, nachher) {
+  return feld === "title" ? titelZeile(nachher) : normalizeNachher(nachher);
+}
+
+/** Neuer Anzeigetext; ein geleerter Absatz verschwindet samt Leerzeilen. Ein Titel darf nicht leer werden. */
 export function applyChange(text, change) {
-  const pos = locate(text, change.vorher, Number.isInteger(change.start) ? change.start : -1);
+  const feld = feldVon(change);
+  if (!FELDER.includes(feld)) throw new Konflikt(`Das Feld „${feld}“ lässt sich nicht bearbeiten.`);
+  const pos = locateIn(feld, text, change.vorher, Number.isInteger(change.start) ? change.start : -1);
+  if (feld === "title") {
+    const titel = titelZeile(change.nachher);
+    if (!titel) throw new Konflikt("Ein Titel darf nicht leer sein.");
+    return titel;
+  }
   const end = pos + change.vorher.length;
   const nachher = normalizeNachher(change.nachher);
   if (hasText(nachher)) return text.slice(0, pos) + nachher + text.slice(end);
@@ -70,7 +103,7 @@ export function applyList(text, changes) {
 // ------------------------------------------------------------------ Warteschlange „unterwegs“
 
 /** Felder, die eine Änderung auf GitHub trägt (alles andere bleibt auf dem Gerät). */
-export const QUEUE_FIELDS = ["id", "zettel", "titel", "vorher", "nachher", "start", "erstellt", "geaendert", "geraet", "wer", "basis"];
+export const QUEUE_FIELDS = ["id", "zettel", "feld", "titel", "vorher", "nachher", "start", "erstellt", "geaendert", "geraet", "wer", "basis"];
 
 export function queueEntry(change) {
   const entry = {};
