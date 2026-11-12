@@ -5,7 +5,7 @@
 // eingespielt sind, steht in aenderungsbuch/unterwegs.json; diese Datei kommt mit „Sichern“
 // zusammen mit der zkn3 auf GitHub. So passen zkn3 und Rückmeldung immer zueinander.
 import { leseZkn3, materialListe, materialTitel } from "./zkn3.js";
-import { FELDER, Konflikt, applyChange, applyList, cleanNachher, feldVon, locateIn, mergeQueue, parseQueue, queueText } from "./aenderung.js";
+import { FELDER, Konflikt, applyChange, applyList, cleanNachher, feldVon, locateIn, mergeQueue, parseQueue, queueEntry, queueText } from "./aenderung.js";
 
 const ZWEIG = "unterwegs";
 const DATEI = "aenderungen.json";
@@ -104,6 +104,8 @@ export function githubQuelle({ apiBase, test = false }) {
     rueckmeldung: {},
     rueckmeldungSha: null,
     material: [],
+    materialRoh: new Map(), // Pfad -> Text der Datei, wie sie auf GitHub liegt
+    materialSha: new Map(), // Pfad -> Git-Prüfsumme dieses Textes
     schlange: { sha: null, aenderungen: [], fehlt: false },
     bekannt: new Set(), // alle Fassungen der Warteschlange, die dieses Fenster schon kennt
     lokal: store.get("lokal", []), // Bearbeitungen, die noch nicht auf GitHub sind
@@ -181,6 +183,14 @@ export function githubQuelle({ apiBase, test = false }) {
       /* ohne Zwischenspeicher geht es auch */
     }
     return bytes;
+  }
+
+  async function rohText(item) {
+    if (!s.materialRoh.has(item.path) || s.materialSha.get(item.path) !== item.sha) {
+      s.materialRoh.set(item.path, new TextDecoder("utf-8", { ignoreBOM: true }).decode(await blob(item.sha))); // wie Python: das BOM gehört zum Text
+      s.materialSha.set(item.path, item.sha);
+    }
+    return s.materialRoh.get(item.path);
   }
 
   async function aufraeumen(behalten) {
@@ -300,6 +310,7 @@ export function githubQuelle({ apiBase, test = false }) {
   function overlay() {
     const groups = new Map();
     for (const change of offene()) {
+      if (change.datei !== undefined) continue; // Material: siehe materialStand
       const key = `${change.zettel}\u0000${feldVon(change)}`;
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(change);
@@ -320,8 +331,17 @@ export function githubQuelle({ apiBase, test = false }) {
     return result;
   }
 
+  /** Text einer Material-Datei mit den offenen Änderungen daran (und welche nicht passen). */
+  function materialStand(path, roh) {
+    const list = offene().filter((e) => e.datei === path);
+    return list.length ? applyList(roh, list) : { text: roh, konflikte: new Map(), applied: 0 };
+  }
+
   function konfliktListe() {
     overlay();
+    for (const [path, roh] of s.materialRoh) {
+      for (const [id, grund] of materialStand(path, roh).konflikte) s.konflikte.set(id, grund);
+    }
     return [...s.schlange.aenderungen, ...s.lokal]
       .filter((e) => s.konflikte.has(e.id) || s.rueckmeldung[e.id]?.status === "konflikt")
       .map((e) => ({ ...e, grund: s.konflikte.get(e.id) || s.rueckmeldung[e.id]?.grund || "" }));
@@ -372,6 +392,34 @@ export function githubQuelle({ apiBase, test = false }) {
     const entry = own || { id: neueId(), sitzung, zettel: id, ...(feld === "content" ? {} : { feld }), erstellt: ortsZeit(new Date()),
       geraet: GERAET, wer: "du", basis: s.modell.version };
     Object.assign(entry, { titel: z.title, vorher, nachher: clean, start: pos, geaendert: ortsZeit(new Date()), fertig: Boolean(fertig) });
+    s.lokal.push(entry);
+    speichereLokal();
+    return { status: "offen", id: entry.id, text: applyChange(text, entry) };
+  }
+
+  /** Nimmt eine Bearbeitung an einer Material-Datei an (ein ganzer Block, beim Verlassen). */
+  function erfasseDatei({ datei, start, vorher, nachher, sitzung }) {
+    const path = String(datei || "");
+    const roh = s.materialRoh.get(path);
+    const item = s.material.find((m) => m.path === path);
+    if (!item || roh === undefined) return { status: "fehler", meldung: "Diese Datei gehört nicht zum Material." };
+    const own = s.lokal.find((e) => e.sitzung === sitzung);
+    const { text } = applyList(roh, offene().filter((e) => e !== own && e.datei === path));
+    let pos;
+    try {
+      pos = locateIn("content", text, vorher, Number.isInteger(start) ? start : -1);
+    } catch (err) {
+      if (!(err instanceof Konflikt)) throw err;
+      return { status: "konflikt", meldung: err.message, text };
+    }
+    const clean = cleanNachher("content", nachher);
+    if (own) s.lokal.splice(s.lokal.indexOf(own), 1);
+    if (clean === vorher) {
+      speichereLokal();
+      return { status: "unveraendert", text };
+    }
+    const entry = own || { id: neueId(), sitzung, datei: path, erstellt: ortsZeit(new Date()), geraet: GERAET, wer: "du", basis: s.modell.version };
+    Object.assign(entry, { titel: item.title || path, vorher, nachher: clean, start: pos, geaendert: ortsZeit(new Date()), fertig: true });
     s.lokal.push(entry);
     speichereLokal();
     return { status: "offen", id: entry.id, text: applyChange(text, entry) };
@@ -532,14 +580,14 @@ export function githubQuelle({ apiBase, test = false }) {
 
     async material() {
       await laden();
-      const decoder = new TextDecoder("utf-8", { ignoreBOM: true }); // wie Python: das BOM gehört zum Text
       return Promise.all(s.material.map(async (item) => {
         let title = item.path.split("/").pop().replace(/\.[^.]*$/, "");
         try {
-          title = materialTitel(item.path, decoder.decode(await blob(item.sha)));
+          title = materialTitel(item.path, materialStand(item.path, await rohText(item)).text);
         } catch {
           /* dann eben der Dateiname */
         }
+        item.title = title;
         return { path: item.path, title, group: item.group };
       }));
     },
@@ -548,7 +596,48 @@ export function githubQuelle({ apiBase, test = false }) {
       await laden();
       const item = s.material.find((m) => m.path === path);
       if (!item) throw new Error("Diese Datei gehört nicht zum Material.");
-      return new TextDecoder("utf-8", { ignoreBOM: true }).decode(await blob(item.sha));
+      return materialStand(path, await rohText(item)).text;
+    },
+
+    async materialAendern(body) {
+      await laden();
+      const item = s.material.find((m) => m.path === String(body.datei || ""));
+      if (item) await rohText(item);
+      const result = erfasseDatei(body);
+      if (result.status === "offen") {
+        result.einspielen = await nacheinander(hochladenLauf);
+        result.text = materialStand(item.path, s.materialRoh.get(item.path)).text;
+      }
+      return { ...result, ...zustand() };
+    },
+
+    materialVerlassen(body) {
+      if (!s.modell) return;
+      if (erfasseDatei(body).status === "offen") this.verlassen([]);
+    },
+
+    async exportDaten() {
+      await laden();
+      const offen = overlay();
+      const payload = s.modell.bookPayload(offen);
+      const material = await Promise.all(s.material.map(async (item) => ({
+        path: item.path, title: item.title || item.path, group: item.group, text: materialStand(item.path, await rohText(item)).text,
+      })));
+      const alle = new Map(offene().map((e) => [e.id, queueEntry(e)]));
+      for (const e of konfliktListe()) alle.set(e.id, { ...queueEntry(e), status: "konflikt", grund: e.grund });
+      return {
+        geraet: GERAET, erstellt: ortsZeit(new Date()),
+        stand: { datum: lokaleZeit(s.zkn3Stand?.datum), datei: payload.file.name },
+        abschnitte: payload.sections.map(({ name, separator }) => ({ name, separator })),
+        kapitel: payload.entries.map((e) => ({ pos: e.pos, id: e.id, title: e.title, kind: e.kind, section: e.section, text: e.text,
+          misc: offen[e.id]?.misc ?? s.modell.byId.get(e.id)?.misc ?? "" })),
+        material,
+        aenderungen: [...alle.values()],
+      };
+    },
+
+    async einlesen() {
+      return { neu: 0, meldung: "Einlesen geht nur im Reader auf dem Laptop." };
     },
 
     async zettel(id) {

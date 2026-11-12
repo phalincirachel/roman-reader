@@ -28,6 +28,7 @@
     <button class="btn" id="weiter" title="Nächstes Kapitel (→)" aria-label="Nächstes Kapitel">→</button>
     <input type="search" class="suche" id="suche" placeholder="Suchen …" aria-label="Im Roman suchen" autocomplete="off" spellcheck="false">
     <button class="btn warn" id="btn-schreibtisch" hidden>Schreibtisch-Fassungen</button>
+    <button class="btn" id="btn-export" data-oeffnet="1" title="Den ganzen Stand als Datei herunterladen (für den Fall ohne Internet)">Export</button>
     <button class="btn primary" id="btn-sichern" title="Alles auf GitHub sichern">Sichern</button>
   </div>
   <div class="legend" hidden>
@@ -40,7 +41,19 @@
 <div class="wrap">
   <article id="doc" lang="de" aria-live="polite"><p class="leer">Der Roman wird geladen …</p></article>
 </div>
-<nav class="minitoc" id="minitoc" hidden aria-label="Übersicht"></nav>
+<div class="schreibleiste" id="schreibleiste" hidden role="toolbar" aria-label="Schreiben">
+  <span class="formate">
+    <button type="button" data-fmt="bold" title="Fett (Strg+B)" aria-label="Fett"><b>F</b></button>
+    <button type="button" data-fmt="italic" title="Kursiv (Strg+I)" aria-label="Kursiv"><i>K</i></button>
+    <button type="button" data-fmt="underline" title="Unterstrichen (Strg+U)" aria-label="Unterstrichen"><u>U</u></button>
+    <button type="button" data-fmt="strikeThrough" title="Durchgestrichen" aria-label="Durchgestrichen"><s>S</s></button>
+    <button type="button" data-act="farben" class="farbknopf" title="Textfarbe" aria-label="Textfarbe">A</button>
+    <button type="button" data-fmt="removeFormat" title="Formatierung der Auswahl entfernen" aria-label="Formatierung entfernen" class="weg">T<small>×</small></button>
+    <span class="farbwahl" hidden></span>
+  </span>
+  <span class="leiste-tag"></span>
+  <button type="button" class="tb" data-act="leiste-verwerfen" hidden>Bearbeitung verwerfen</button>
+</div>
 
 <aside class="insp" id="insp" hidden aria-label="Einzelheiten">
   <div class="insp-head"><strong id="insp-title"></strong><span class="where" id="insp-where"></span><button class="x" id="insp-close" aria-label="Schließen">×</button></div>

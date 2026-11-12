@@ -21,6 +21,9 @@ function post(url, body) {
   return api(url, { method: "POST", headers: HEADERS, body: JSON.stringify(body) });
 }
 
+const pad = (n) => String(n).padStart(2, "0");
+const ortsZeit = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+
 async function apiText(url) {
   const response = await fetch(url, { cache: "no-store" });
   if (!response.ok) throw new Error(`Fehler ${response.status}`);
@@ -49,6 +52,20 @@ export function lokaleQuelle() {
     aktion: (aktion, id) => post("/api/aenderungen/aktion", { aktion, id }),
     sichern: () => post("/api/sichern", {}),
     status: () => api("/api/status"),
+    /** Material (Handlung, Figuren …): einen Block ändern; die Datei wird gleich geschrieben. */
+    materialAendern: (body) => post("/api/material/aendern", body),
+    materialVerlassen(body) {
+      fetch("/api/material/aendern", { method: "POST", keepalive: true, headers: HEADERS, body: JSON.stringify(body) });
+    },
+    /** Das letzte Fenster schließt: der Dienst lädt dann bald selbst auf GitHub hoch. */
+    fensterZu() {
+      fetch("/api/fenster-zu", { method: "POST", keepalive: true, headers: HEADERS, body: "{}" }).catch(() => {});
+    },
+    async exportDaten() {
+      const daten = await api("/api/export");
+      return { ...daten, geraet: "Laptop", erstellt: ortsZeit(new Date()) };
+    },
+    einlesen: (aenderungen) => post("/api/einlesen", { aenderungen }),
     pause: { sichtbar: 5000, offline: 8000, versteckt: 60000 },
     texte: {
       offline: ["Keine Verbindung zum Reader-Dienst", "Über die Verknüpfung „Roman“ startet er neu."],

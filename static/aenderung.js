@@ -31,9 +31,15 @@ export function locateIn(feld, text, vorher, hint = -1) {
   return locate(text, vorher, hint);
 }
 
-/** Position, an der `vorher` als ganzer Absatz im Text steht (hint: vermutete Position). */
+/**
+ * Position, an der `vorher` als ganze Zeilen im Text steht (hint: vermutete Position).
+ * Ein leeres `vorher` heißt: Das Feld war leer – das passt nur, solange es noch leer ist.
+ */
 export function locate(text, vorher, hint = -1) {
-  if (!vorher) throw new Konflikt("Der Ausgangstext ist leer.");
+  if (!vorher) {
+    if (!hasText(text)) return 0;
+    throw new Konflikt("Das Feld war leer, inzwischen steht anderswo etwas darin.");
+  }
   const whole = (pos) => {
     const end = pos + vorher.length;
     return (pos === 0 || text[pos - 1] === "\n") && (end === text.length || text[end] === "\n");
@@ -70,8 +76,9 @@ export function applyChange(text, change) {
     if (!titel) throw new Konflikt("Ein Titel darf nicht leer sein.");
     return titel;
   }
-  const end = pos + change.vorher.length;
   const nachher = normalizeNachher(change.nachher);
+  if (!change.vorher) return hasText(nachher) ? nachher : ""; // das leere Feld bekommt seinen ersten Text
+  const end = pos + change.vorher.length;
   if (hasText(nachher)) return text.slice(0, pos) + nachher + text.slice(end);
   let tail = end;
   while (tail < text.length && text[tail] === "\n") tail += 1;
@@ -100,10 +107,71 @@ export function applyList(text, changes) {
   return { text, konflikte, applied };
 }
 
+/**
+ * Was sich zwischen zwei Fassungen eines Feldes geändert hat – als Ersetzung ganzer Zeilen, so wie
+ * das Schreibwerkzeug Änderungen einspielt: { start, vorher, nachher } oder null (nichts geändert).
+ *
+ * roh:   der Text, wie er im Zettel steht (`vorher` und `start` stammen daraus);
+ * basis: derselbe Stand, wie ihn der Browser zurückliest – Zeile für Zeile wie roh, nur die
+ *        Reihenfolge von Formatcodes an derselben Stelle kann abweichen;
+ * neu:   der bearbeitete Text (wie basis zurückgelesen).
+ * Am Rand der Änderung stehen Zeilen mit Text (Leerzeilen am Rand gehen beim Einspielen verloren).
+ * War das Feld leer, ist `vorher` leer und `nachher` der ganze neue Text.
+ */
+export function zeilenAenderung(roh, basis, neu) {
+  const R = String(roh ?? "").split("\n");
+  const B = String(neu ?? "").split("\n");
+  let A = String(basis ?? roh ?? "").split("\n");
+  if (A.length !== R.length) A = R; // passt nicht Zeile für Zeile: dann direkt gegen den Zettel
+  const n = Math.min(A.length, B.length);
+  let p = 0;
+  while (p < n && A[p] === B[p]) p += 1;
+  let s = 0;
+  while (s < n - p && A[A.length - 1 - s] === B[B.length - 1 - s]) s += 1;
+  let a0 = p;
+  let a1 = A.length - s;
+  let b0 = p;
+  let b1 = B.length - s;
+  if (a0 === a1 && b0 === b1) return null;
+  // Nur eingefügt oder nur gelöscht: Leerzeilen am Rand lieber oben als unten (dann ist der Bereich kleiner)
+  if (a0 === a1) while (a0 > 0 && b1 > b0 && !hasText(B[b1 - 1]) && B[b1 - 1] === A[a0 - 1]) { a0 -= 1; a1 -= 1; b0 -= 1; b1 -= 1; }
+  if (b0 === b1) while (b0 > 0 && a1 > a0 && !hasText(A[a1 - 1]) && A[a1 - 1] === B[b0 - 1]) { a0 -= 1; a1 -= 1; b0 -= 1; b1 -= 1; }
+  const bIrgendwo = B.some(hasText);
+  for (;;) {
+    const aText = A.slice(a0, a1).some(hasText);
+    const bText = B.slice(b0, b1).some(hasText);
+    const obenLeer = bText && !hasText(B[b0]);
+    const untenLeer = bText && !hasText(B[b1 - 1]);
+    // Ganz ohne Text im neuen Teil würde das Einspielen auch die Leerzeilen daneben entfernen:
+    // dann eine Nachbarzeile mitnehmen (außer das ganze Feld ist leer geworden)
+    const nachbar = !bText && bIrgendwo;
+    if (aText && !obenLeer && !untenLeer && !nachbar) break;
+    let weiter = false;
+    if ((!aText || obenLeer || nachbar) && a0 > 0) {
+      a0 -= 1;
+      b0 -= 1;
+      weiter = true;
+    }
+    if ((((!aText || nachbar) && !weiter) || untenLeer) && a1 < A.length) {
+      a1 += 1;
+      b1 += 1;
+      weiter = true;
+    }
+    if (!weiter) break;
+  }
+  if (!A.slice(a0, a1).some(hasText)) {
+    // Das ganze Feld war leer (oder nur Leerzeilen): der neue Text ersetzt es
+    return hasText(neu) ? { start: 0, vorher: "", nachher: String(neu) } : null;
+  }
+  let start = 0;
+  for (let i = 0; i < a0; i += 1) start += R[i].length + 1;
+  return { start, vorher: R.slice(a0, a1).join("\n"), nachher: B.slice(b0, b1).join("\n") };
+}
+
 // ------------------------------------------------------------------ Warteschlange „unterwegs“
 
 /** Felder, die eine Änderung auf GitHub trägt (alles andere bleibt auf dem Gerät). */
-export const QUEUE_FIELDS = ["id", "zettel", "feld", "titel", "vorher", "nachher", "start", "erstellt", "geaendert", "geraet", "wer", "basis"];
+export const QUEUE_FIELDS = ["id", "zettel", "datei", "feld", "titel", "vorher", "nachher", "start", "erstellt", "geaendert", "geraet", "wer", "basis"];
 
 export function queueEntry(change) {
   const entry = {};
@@ -138,5 +206,5 @@ export function parseQueue(text) {
   const data = JSON.parse(text);
   const list = Array.isArray(data?.aenderungen) ? data.aenderungen : [];
   return list.filter((e) => e && typeof e.id === "string" && typeof e.vorher === "string" && typeof e.nachher === "string"
-    && e.zettel !== undefined);
+    && (e.zettel !== undefined || typeof e.datei === "string"));
 }

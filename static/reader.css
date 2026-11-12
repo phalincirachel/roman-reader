@@ -151,8 +151,7 @@ details.vermerke > summary{cursor:pointer;font-size:.8rem;color:var(--accent);wi
 .vermerke-text{margin-top:.5rem;max-height:60vh;overflow:auto;border:1px solid var(--pc-line);background:var(--pc-bg);border-radius:8px;padding:.6rem .8rem .6rem 1.2rem}
 .vermerke-text:has(.blk-tools){padding-top:1.5rem}
 .vermerke-text .text{font-size:.98rem;font-weight:400}
-.vermerke-text .blk.vermerk{margin:0 0 .7rem}
-.vermerke-text .blk.vermerk:last-child{margin-bottom:0}
+details.vermerke.leer > summary{color:var(--muted)}
 
 /* Kapitel, Abschnitte, Absätze */
 .kap-ort{font-family:var(--sans);font-size:.72rem;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);display:block}
@@ -166,22 +165,31 @@ mark.treffer{background:var(--mark-bg);color:inherit;border-radius:2px}
 mark.treffer.aktiv{outline:2px solid var(--accent);outline-offset:1px}
 .szenenwechsel{text-align:center;color:var(--muted);letter-spacing:.3em;margin:1.2rem 0}
 hr.trennstrich{border:0;border-top:1px solid var(--line);width:30%;margin:1.4rem auto}
-body.mit-nummern #doc{counter-reset:abs}
-body.mit-nummern .kapitel{counter-reset:abs}
-body.mit-nummern .blk.absatz{counter-increment:abs}
-body.mit-nummern .blk.absatz::before{content:counter(abs);position:absolute;left:-1.6rem;top:.3rem;font-size:.68rem;color:var(--muted);width:1.4rem;text-align:right;font-family:var(--sans)}
-.blk.bearbeitet .ed{border-left:3px solid var(--custom-ink);padding-left:.7rem;margin-left:-1rem;border-radius:0 6px 6px 0}
-.blk.wartet .ed{border-left-color:var(--ins-line)}
-.blk.konflikt .ed{border-left:3px solid var(--del-ink);padding-left:.7rem;margin-left:-1rem}
+/* Der Text eines Zettels ist ein durchgehendes Feld; Absatznummern stehen nur am Rand */
+.blk.feld{margin:0}
+.blk.feld > .ed{min-height:2.2em}
+.blk.feld > .ed:focus{box-shadow:none} /* ein ganzes Kapitel bekommt keinen Rahmen; die Schreibleiste zeigt, dass geschrieben wird */
+.vermerke-text .blk.feld > .ed:focus{box-shadow:0 0 0 1px var(--accent)}
+.ed:empty::before{content:attr(data-leer);color:var(--muted);font-style:italic}
+.nummern{position:absolute;left:-1.9rem;top:0;width:1.5rem;pointer-events:none;user-select:none;-webkit-user-select:none}
+.nummern span{position:absolute;right:0;font-size:.68rem;line-height:1.4;padding-top:.3rem;color:var(--muted);font-family:var(--sans);font-variant-numeric:tabular-nums}
+body:not(.mit-nummern) .nummern{display:none}
+.blk.titel.bearbeitet .ed{border-left:3px solid var(--custom-ink);padding-left:.7rem;margin-left:-1rem;border-radius:0 6px 6px 0}
+.blk.wartet > .ed{border-left:3px solid var(--ins-line);padding-left:.7rem;margin-left:-1rem;border-radius:0 6px 6px 0}
+.blk.konflikt > .ed{border-left:3px solid var(--del-ink);padding-left:.7rem;margin-left:-1rem}
+.text b{font-weight:700}
+.ed font[color="#010203"]{color:inherit}
 .blk .zustand{font-size:.72rem;color:var(--muted)}
 .blk.konflikt .zustand{color:var(--del-ink);font-weight:600}
 /* Werkzeuge eines Absatzes schweben über ihm, statt Platz zu belegen (kurze Absätze stehen sonst weit auseinander) */
-.blk:is(.absatz,.vermerk,.titel) > .blk-tools{position:absolute;right:0;top:-1.3rem;margin:0;z-index:2;background:var(--surface);border-radius:6px;padding:0 .15rem;pointer-events:none}
-.blk.vermerk > .blk-tools{background:var(--pc-bg)}
+.blk:is(.feld,.titel) > .blk-tools{position:absolute;right:0;top:-1.3rem;margin:0;z-index:2;background:var(--surface);border-radius:6px;padding:0 .15rem;pointer-events:none}
+.vermerke-text .blk.feld > .blk-tools{background:var(--pc-bg);top:-1.25rem}
 .blk.titel > .blk-tools{top:.1rem}
-.blk:is(.absatz,.vermerk,.titel):hover > .blk-tools,.blk:is(.absatz,.vermerk,.titel):focus-within > .blk-tools{pointer-events:auto}
-.blk:is(.absatz,.vermerk,.titel) > .blk-tools .tag{margin-right:.4rem}
-.blk:is(.absatz,.vermerk,.titel):is(.wartet,.konflikt) > .blk-tools{opacity:1}
+.blk:is(.feld,.titel):hover > .blk-tools,.blk.titel:focus-within > .blk-tools{pointer-events:auto}
+.blk:is(.feld,.titel) > .blk-tools .tag{margin-right:.4rem}
+.blk:is(.feld,.titel):is(.wartet,.konflikt) > .blk-tools{opacity:1}
+/* Beim Schreiben zeigt die Schreibleiste oben den Zustand – das Feld selbst bleibt ruhig */
+.blk.feld:focus-within > .blk-tools{opacity:0;pointer-events:none}
 mark.treffer-v{background:var(--mark-bg);color:inherit;border-radius:2px}
 
 .kap-nav{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-top:2.4rem}
@@ -190,15 +198,6 @@ mark.treffer-v{background:var(--mark-bg);color:inherit;border-radius:2px}
 .kap-nav a.weiter{text-align:right;grid-column:2}
 .kap-nav small{display:block;color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.06em}
 .kap-nav span{font-family:var(--serif)}
-
-/* Mini-Übersicht der Gesamtansicht (rechts neben dem Blatt) */
-.minitoc{position:fixed;right:1rem;top:calc(var(--hdr,8rem) + 1rem);width:13rem;max-height:calc(100vh - var(--hdr,8rem) - 2rem);overflow:auto;font-size:.72rem;line-height:1.45;padding:.4rem 0;z-index:5}
-.minitoc .m-jahr{color:var(--muted);font-weight:600;padding:.35rem .5rem 0}
-.minitoc a{display:block;color:var(--muted);text-decoration:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:0 .5rem;border-left:2px solid transparent}
-.minitoc a.art-szene{color:var(--ink)}
-.minitoc a:hover{background:var(--surface-2)}
-.minitoc a.aktuell{border-left-color:var(--accent);color:var(--accent);font-weight:600}
-@media (max-width:1399px){ .minitoc{display:none} }
 
 /* Inspektor-Inhalte: Details, Suche, Änderungen */
 .details-raster{display:grid;grid-template-columns:max-content 1fr;gap:.25rem .9rem;margin:0 0 .6rem;font-size:.84rem}
@@ -237,7 +236,7 @@ a.treffer mark{background:var(--mark-bg);color:inherit;border-radius:2px}
 .insp h4{margin:.8rem 0 .2rem;font-size:.9rem}
 
 /* Unterwegs (Chromebook): Zugang einrichten – solange gibt es nichts zu blättern oder zu suchen */
-body[data-einrichten="1"] :is(#views,#toggles,.actions,.legend,.inhalt,.minitoc){display:none!important}
+body[data-einrichten="1"] :is(#views,#toggles,.actions,.legend,.inhalt,.schreibleiste){display:none!important}
 body[data-einrichten="1"] .wrap{margin-left:auto!important}
 .einrichten{max-width:36rem;margin:.5rem auto 1.5rem;font-size:.95rem}
 .einrichten h2{font-family:var(--serif);font-size:1.5rem;font-weight:600;margin:.2rem 0 1rem}
@@ -260,10 +259,35 @@ body[data-einrichten="1"] .wrap{margin-left:auto!important}
   .bar .suche{width:8rem}
   .insp{left:0;right:0;bottom:0;width:100%;max-height:72vh;border-radius:14px 14px 0 0}
   .text{font-size:1.02rem}
-  body.mit-nummern .blk.absatz::before{display:none}
 }
 @media print{
-  .bar,.inhalt,.insp,.blk-tools,.toast,.minitoc,.kap-nav,details.vermerke,.kopieren{display:none!important}
+  .bar,.inhalt,.insp,.blk-tools,.toast,.schreibleiste,.kap-nav,details.vermerke,.kopieren,.nummern{display:none!important}
   body{background:#fff}
   #doc{border:0}
 }
+
+/* Schreibleiste: fett, kursiv, unterstrichen, durchgestrichen, Farbe – oben rechts am Blatt, solange geschrieben wird */
+.schreibleiste{position:fixed;z-index:30;display:flex;flex-wrap:wrap;align-items:center;gap:.35rem .5rem;max-width:calc(100vw - 1rem);background:var(--surface);border:1px solid var(--line);border-radius:9px;box-shadow:var(--shadow);padding:.25rem .4rem;font-size:.78rem;color:var(--muted)}
+.schreibleiste .formate{display:inline-flex;align-items:center;gap:.15rem;position:relative}
+.schreibleiste .formate > button{min-width:1.75rem;height:1.75rem;border:1px solid transparent;border-radius:6px;background:transparent;font-family:var(--serif);font-size:.95rem;line-height:1;padding:0 .3rem;color:var(--ink)}
+.schreibleiste .formate > button:hover{border-color:var(--line);background:var(--surface-2)}
+.schreibleiste .farbknopf{text-decoration:underline;text-decoration-color:#d04437;text-decoration-thickness:3px;text-underline-offset:2px}
+.schreibleiste .weg small{font-size:.65rem;margin-left:1px}
+.schreibleiste .farbwahl{position:absolute;top:calc(100% + .35rem);left:3.6rem;display:flex;gap:.3rem;background:var(--surface);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow);padding:.35rem}
+.schreibleiste .farbwahl[hidden]{display:none}
+.schreibleiste .farbe{width:1.3rem;height:1.3rem;border-radius:50%;border:2px solid var(--surface);outline:1px solid var(--line);background:var(--f);padding:0}
+.schreibleiste .farbe.ohne{background:linear-gradient(135deg,var(--surface) 45%,var(--del-ink) 47%,var(--del-ink) 53%,var(--surface) 55%)}
+.schreibleiste .farbe:hover{outline-color:var(--accent)}
+.schreibleiste .leiste-tag{white-space:nowrap}
+.schreibleiste .leiste-tag.konflikt{color:var(--del-ink);font-weight:600}
+.schreibleiste .tb{border:1px solid var(--line);background:transparent;border-radius:6px;padding:.1rem .45rem;font-size:.74rem}
+.schreibleiste .tb:hover{border-color:var(--accent);color:var(--accent)}
+
+/* Material: jeder Block lässt sich anklicken und als Markdown bearbeiten */
+.md-blk{position:relative;border-radius:6px;margin:0 -.4rem;padding:0 .4rem;cursor:text}
+.md-blk:hover{background:var(--surface-2)}
+.md-blk.bearbeiten{background:transparent;margin:.6rem -.4rem}
+.md-blk.speichert{opacity:.7}
+.md-blk.konflikt{outline:2px solid var(--del-ink)}
+.md-quelle.ed{font-family:var(--serif);font-size:.98rem;line-height:1.55;background:var(--bg);box-shadow:0 0 0 1px var(--accent);padding:.4rem .6rem;margin:0}
+.md-blk.bearbeiten + .md-blk,.md-blk + .md-blk.bearbeiten{margin-top:.6rem}

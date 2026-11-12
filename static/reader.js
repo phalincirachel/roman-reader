@@ -1,16 +1,21 @@
 // Reader für den Roman – Grundlage ist überarbeitung33.html.
-// Lesen und Bearbeiten: Jeder Absatz, der Titel und die Sonstigen Vermerke sind direkt
-// beschreibbar. Auf dem Laptop wird über den lokalen Dienst gespeichert (Schreibwerkzeug mit
-// Sicherungskopie und Änderungsbuch; solange das Zettelkasten-Programm geöffnet ist, warten
-// die Änderungen). Unterwegs (Chromebook) kommen Text und Änderungen über GitHub – siehe daten.js.
+// Lesen und Bearbeiten: Der Text eines Zettels steht als durchgehender Text da und ist direkt
+// beschreibbar – ebenso Titel, Sonstige Vermerke und das Material (Handlung, Figuren …).
+// Fett, kursiv, unterstrichen, durchgestrichen und Farben werden mit den Codes des
+// Zettelkasten-Programms gespeichert (format.js). Absatznummern stehen nur am Rand.
+// Auf dem Laptop wird über den lokalen Dienst gespeichert (Schreibwerkzeug mit Sicherungskopie
+// und Änderungsbuch; solange das Zettelkasten-Programm geöffnet ist, warten die Änderungen).
+// Unterwegs (Chromebook) kommen Text und Änderungen über GitHub – siehe daten.js.
 import {
   escapeHtml, findAll, snippetHtml, formatNumber, formatDate, readingMinutes, KIND_LABELS,
-  paragraphSpans, editableHtml, countWords, bookTitle,
+  paragraphSpans, countWords, bookTitle,
 } from "./textsatz.js";
 import { marked } from "./vendor/marked.esm.js";
 import { LOKALER_RECHNER, waehleQuelle } from "./daten.js";
-import { titelZeile } from "./aenderung.js";
+import { titelZeile, zeilenAenderung } from "./aenderung.js";
 import { kindOf } from "./zkn3.js";
+import { FARBEN, OHNE_FARBE, domLesen, feldHtml, klartext } from "./format.js";
+import { exportHtml, exportName, leseExport } from "./export.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -18,11 +23,11 @@ const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 const doc = $("#doc");
 const tocEl = $("#inhalt-liste");
 const tocPanel = $("#inhalt");
-const mini = $("#minitoc");
 const insp = $("#insp");
 const toastEl = $("#toast");
 const errorBox = $("#fehler");
 const searchInput = $("#suche");
+const leiste = $("#schreibleiste");
 
 let quelle = null; // Laptop-Dienst oder GitHub (daten.js)
 let toastTimer = null;
@@ -72,6 +77,7 @@ function saveSettings() {
 
 function hdrHeight() {
   document.documentElement.style.setProperty("--hdr", `${$("header.bar").offsetHeight}px`);
+  leistePlatz();
 }
 
 function wideScreen() {
@@ -97,6 +103,7 @@ function setTocOpen(open) {
   saveSettings();
   applySettings();
   if (open) markCurrent(state.view?.id);
+  setTimeout(nummernSichtbare, 250); // die Breite des Blatts ändert sich
 }
 
 // ------------------------------------------------------------------ Zustand
@@ -107,6 +114,8 @@ const state = {
   entriesById: new Map(),
   extra: new Map(), // Zettel außerhalb der Anordnung, die gerade angezeigt werden
   material: [],
+  materialText: null, // Text der gerade angezeigten Material-Datei
+  materialNeu: false, // gespeichert, aber noch nicht neu gesetzt (ein anderer Block stand offen)
   view: null, // { mode, id | path }
   term: "",
   hitIndex: 0,
@@ -116,10 +125,8 @@ const state = {
   wholeKey: null,
   chapters: [],
   currentWhole: null,
-  rerender: new Set(), // Kapitel, deren Absätze nach dem Bearbeiten neu gesetzt werden
-  rerenderMisc: new Set(), // ebenso für die Sonstigen Vermerke
   openMisc: new Set(), // Zettel, deren Sonstige Vermerke aufgeklappt sind
-  edited: new Map(), // `${zettel}\0${feld}\0${jetziger Text}` -> Text vor der ersten Bearbeitung in dieser Sitzung
+  edited: new Map(), // `${zettel}\0${feld}` -> { erst: Text vor der ersten Bearbeitung, jetzt: zuletzt gespeichert }
   saving: 0,
   reloadWanted: false,
   lastError: null,
@@ -127,7 +134,13 @@ const state = {
 };
 
 // Bearbeitbare Felder eines Zettels: content (Text), title (Titel), misc (Sonstige Vermerke)
-const editKey = (zettel, feld, text) => `${zettel}\u0000${feld}\u0000${text}`;
+const fkey = (zettel, feld) => `${zettel}\u0000${feld}`;
+const FELD_NAMEN = { content: "Text", misc: "Sonstige Vermerke", title: "Titel" };
+const LEER_HINWEIS = {
+  content: "Noch kein Text – hineinklicken und schreiben",
+  misc: "Noch keine Vermerke – hineinklicken und schreiben",
+  title: "(ohne Titel)",
+};
 
 function fieldText(entry, feld) {
   if (feld === "title") return entry.title;
@@ -232,6 +245,7 @@ function markCurrentMaterial(path) {
   tocEl.querySelector(`a.toc-e[data-path="${CSS.escape(path)}"]`)?.classList.add("aktuell");
 }
 
+// In der Gesamtansicht springt ein Klick an den Kapitelanfang – auch auf das schon markierte Kapitel
 tocEl.addEventListener("click", (event) => {
   const link = event.target.closest("a.toc-e");
   if (!link) return;
@@ -270,6 +284,7 @@ async function route() {
     history.replaceState(null, "", `#${target.mode}/${target.id}`);
   }
   const first = !state.view;
+  versteckeLeiste();
   if (target.mode === "kapitel") {
     showChapter(target.id, { restore: first && saved?.mode === "kapitel" && saved.id === target.id ? saved.scroll : null });
   } else if (target.mode === "gesamt") {
@@ -283,13 +298,18 @@ async function route() {
 
 function setView(mode) {
   $$("#views button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.view === mode)));
-  mini.hidden = mode !== "gesamt";
   $("#vor").disabled = mode !== "kapitel";
   $("#weiter").disabled = mode !== "kapitel";
   if (mode !== "gesamt") {
     state.wholeKey = null;
     state.chapters = [];
   }
+  if (mode !== "material") {
+    state.materialText = null;
+    state.materialNeu = false;
+  }
+  nummernSicht.disconnect();
+  sichtbar.clear();
 }
 
 function currentEntryId() {
@@ -331,19 +351,46 @@ function desktopNote(entry) {
 const COPY_ICON = '<svg class="symbol" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">'
   + '<rect x="1.5" y="1.5" width="9" height="9" rx="1.6"/><rect x="5.5" y="5.5" width="9" height="9" rx="1.6"/></svg>';
 
-function toolbarHtml(label, edited) {
-  return `<div class="blk-tools"><span class="tag">${label}<span class="zustand">${edited ? " · bearbeitet" : ""}</span></span>`
-    + `<button class="tb" data-act="verwerfen"${edited ? "" : " hidden"}>Bearbeitung verwerfen</button></div>`;
+function istBearbeitet(entry, feld) {
+  const info = state.edited.get(fkey(entry.id, feld));
+  return Boolean(info) && info.jetzt === fieldText(entry, feld);
 }
 
-function titleHtml(entry, tag, tools) {
-  const edited = state.edited.has(editKey(entry.id, "title", entry.title));
-  return `<div class="titelzeile"><div class="blk titel${edited ? " bearbeitet" : ""}" data-feld="title" data-s="0" data-e="${entry.title.length}">`
-    + `${tools ? toolbarHtml("Titel", edited) : ""}<${tag} class="text ed" contenteditable="true" spellcheck="true" data-leer="(ohne Titel)">${escapeHtml(entry.title)}</${tag}></div>`
+function toolbarHtml(feld, edited) {
+  return `<div class="blk-tools"><span class="tag">${FELD_NAMEN[feld]}<span class="zustand">${edited ? " · bearbeitet" : ""}</span></span>`
+    + `<button type="button" class="tb" data-act="verwerfen"${edited ? "" : " hidden"}>Bearbeitung verwerfen</button></div>`;
+}
+
+function titleHtml(entry, tag) {
+  const edited = istBearbeitet(entry, "title");
+  return `<div class="titelzeile"><div class="blk titel" data-feld="title">`
+    + `${toolbarHtml("title", edited)}<${tag} class="text ed" contenteditable="true" spellcheck="true" data-leer="${LEER_HINWEIS.title}">${escapeHtml(entry.title)}</${tag}></div>`
     + `<button type="button" class="kopieren" data-act="kopieren" title="Überschrift und Text kopieren (ohne Vermerke)" aria-label="Überschrift und Text kopieren">${COPY_ICON}</button></div>`;
 }
 
-function headingHtml(entry, level, tools) {
+/** Inhalt eines Feldes für den Browser (Text formatiert, Vermerke als reiner Text). */
+function feldInnen(entry, feld, startIndex = 0) {
+  const text = fieldText(entry, feld);
+  const misc = feld === "misc";
+  const { html, hits } = feldHtml(text, { term: state.term, startIndex, markClass: misc ? "treffer-v" : "treffer", formate: feld === "content" });
+  // Endet der Text mit einem Zeilenumbruch, braucht die letzte (leere) Zeile einen Platzhalter
+  return { html: html + (text.endsWith("\n") ? '<br data-ende="">' : ""), hits };
+}
+
+/** Ein ganzes Feld als ein durchgehender, beschreibbarer Text. */
+function feldBlockHtml(entry, feld) {
+  const { html, hits } = feldInnen(entry, feld, feld === "content" ? hitCounter : 0);
+  if (feld === "content") hitCounter += hits;
+  return `<div class="blk feld" data-feld="${feld}">${toolbarHtml(feld, istBearbeitet(entry, feld))}`
+    + (feld === "content" ? '<div class="nummern" aria-hidden="true"></div>' : "")
+    + `<div class="text ed" contenteditable="true" spellcheck="true" data-leer="${LEER_HINWEIS[feld]}">${html}</div></div>`;
+}
+
+function vermerkeSumme(entry) {
+  return entry.miscWords ? "Sonstige Vermerke" : "Sonstige Vermerke (keine)";
+}
+
+function headingHtml(entry, level) {
   const meta = [
     entry.pos ? sectionName(entry) : "nicht in der Anordnung",
     KIND_LABELS[entry.kind],
@@ -353,38 +400,16 @@ function headingHtml(entry, level, tools) {
     entry.edited ? `geändert ${formatDate(entry.edited, false)}` : null,
   ].filter(Boolean).join(" · ");
   const tag = level === 1 ? "h2" : "h3";
-  let vermerke = "";
-  if (entry.miscWords) {
-    // Aufgeklappt bleibt aufgeklappt, auch wenn das Kapitel neu gesetzt wird
-    const open = state.openMisc.has(entry.id);
-    const known = open && entry.misc !== undefined;
-    vermerke = `<details class="vermerke" data-id="${escapeHtml(entry.id)}" data-tools="${tools ? 1 : 0}"${open ? " open" : ""}${known ? ' data-geladen="1"' : ""}>`
-      + `<summary>Sonstige Vermerke</summary><div class="vermerke-text">${known ? miscHtml(entry, tools) : '<p class="hint">Wird geladen …</p>'}</div></details>`;
-  }
-  return `<section class="blk kind-heading lvl-${level}"><span class="kap-ort">${escapeHtml(meta)}</span>${titleHtml(entry, tag, tools)}${vermerke}${desktopNote(entry)}</section>`;
+  // Aufgeklappt bleibt aufgeklappt, auch wenn das Kapitel neu gesetzt wird
+  const open = state.openMisc.has(entry.id);
+  const known = open && entry.misc !== undefined;
+  const vermerke = `<details class="vermerke${entry.miscWords ? "" : " leer"}" data-id="${escapeHtml(entry.id)}"${open ? " open" : ""}${known ? ' data-geladen="1"' : ""}>`
+    + `<summary>${vermerkeSumme(entry)}</summary><div class="vermerke-text">${known ? feldBlockHtml(entry, "misc") : '<p class="hint">Wird geladen …</p>'}</div></details>`;
+  return `<section class="blk kind-heading lvl-${level}"><span class="kap-ort">${escapeHtml(meta)}</span>${titleHtml(entry, tag)}${vermerke}${desktopNote(entry)}</section>`;
 }
 
-/** Ein bearbeitbarer Absatz des Textes (feld content) oder der Sonstigen Vermerke (feld misc). */
-function blockHtml(entry, feld, span, index, tools) {
-  const raw = fieldText(entry, feld).slice(span.start, span.end);
-  const misc = feld === "misc";
-  // Treffer in den Vermerken zählen nicht zu denen im Text (Sprung zum n-ten Treffer)
-  const { html, hits } = editableHtml(raw, { term: state.term, startIndex: misc ? 0 : hitCounter, markClass: misc ? "treffer-v" : "treffer" });
-  if (!misc) hitCounter += hits;
-  const edited = state.edited.has(editKey(entry.id, feld, raw));
-  return `<div class="blk ${misc ? "vermerk" : "absatz"}${edited ? " bearbeitet" : ""}" data-feld="${feld}" data-i="${index}" data-s="${span.start}" data-e="${span.end}">`
-    + `${tools ? toolbarHtml("Absatz", edited) : ""}<div class="text ed" contenteditable="true" spellcheck="true">${html}</div></div>`;
-}
-
-function miscHtml(entry, tools) {
-  const spans = paragraphSpans(entry.misc ?? "");
-  return spans.map((s, i) => blockHtml(entry, "misc", s, i, tools)).join("") || '<p class="hint">keine</p>';
-}
-
-function chapterHtml(entry, { level, tools }) {
-  const spans = paragraphSpans(entry.text);
-  const blocks = spans.map((s, i) => blockHtml(entry, "content", s, i, tools)).join("");
-  return headingHtml(entry, level, tools) + (blocks || '<p class="leer">(Dieser Zettel hat noch keinen Text.)</p>');
+function chapterHtml(entry, level) {
+  return headingHtml(entry, level) + feldBlockHtml(entry, "content");
 }
 
 function navHtml(entry) {
@@ -402,12 +427,13 @@ function showChapter(id, { restore = null, toHit = true } = {}) {
   setView("kapitel");
   state.view = { mode: "kapitel", id: entry.id };
   hitCounter = 0;
-  doc.innerHTML = `<div class="kapitel" data-zettel="${escapeHtml(entry.id)}">${chapterHtml(entry, { level: 1, tools: true })}</div>${navHtml(entry)}`;
+  doc.innerHTML = `<div class="kapitel" data-zettel="${escapeHtml(entry.id)}">${chapterHtml(entry, 1)}</div>${navHtml(entry)}`;
   loadOpenMisc();
   markCurrent(entry.id);
   updatePlace(entry);
   if (toHit && state.term && hitCounter) scrollToHit(state.hitIndex);
   else window.scrollTo(0, restore ?? 0);
+  nummernAlle();
   savePosition();
 }
 
@@ -420,13 +446,14 @@ function showMissing(message) {
 function scrollToHit(n) {
   const marks = $$("mark.treffer", doc);
   if (!marks.length) return;
-  const mark = marks[Math.min(n, marks.length - 1)];
+  // Ein Treffer kann aus mehreren Stücken bestehen (etwa halb fett): alle tragen dieselbe Nummer
+  const mark = doc.querySelector(`mark.treffer[data-n="${Number(n)}"]`) || marks[marks.length - 1];
   marks.forEach((m) => m.classList.remove("aktiv"));
-  mark.classList.add("aktiv");
+  $$(`mark.treffer[data-n="${mark.dataset.n}"]`, doc).forEach((m) => m.classList.add("aktiv"));
   mark.scrollIntoView({ block: "center" });
 }
 
-// Sonstige Vermerke (misc) erst beim Aufklappen laden – danach absatzweise beschreibbar wie der Text
+// Sonstige Vermerke (misc) erst beim Aufklappen laden – danach beschreibbar wie der Text
 async function loadMisc(details) {
   if (!details.open || details.dataset.geladen) return;
   details.dataset.geladen = "1";
@@ -437,7 +464,7 @@ async function loadMisc(details) {
     if (!entry || !details.isConnected) return;
     entry.misc = z.misc;
     entry.miscWords = z.miscWords;
-    box.innerHTML = miscHtml(entry, details.dataset.tools === "1");
+    box.innerHTML = feldBlockHtml(entry, "misc");
   } catch (err) {
     box.innerHTML = `<p class="hint">${escapeHtml(err.message)}</p>`;
     delete details.dataset.geladen;
@@ -459,7 +486,8 @@ doc.addEventListener("toggle", (event) => {
 // ------------------------------------------------------------------ Gesamtansicht
 
 function estimateHeight(entry) {
-  return Math.round(entry.words * 2.2 + (entry.text.match(/\n\s*\n/g) || []).length * 18 + 140);
+  const blank = (entry.text.match(/\n(?=[ \t]*\n)/g) || []).length;
+  return Math.round(entry.words * 2.1 + blank * 28 + 170);
 }
 
 function showWhole(id, { offset = null } = {}) {
@@ -480,13 +508,12 @@ function showWhole(id, { offset = null } = {}) {
       lastSection = entry.section;
     }
     // Nur in der Gesamtansicht: Kapitel außerhalb des Bildes werden nicht gesetzt (schnelles Scrollen)
-    parts.push(`<div class="kapitel" data-zettel="${escapeHtml(entry.id)}" style="content-visibility:auto;contain-intrinsic-size:auto ${estimateHeight(entry)}px">${chapterHtml(entry, { level: 2, tools: false })}</div>`);
+    parts.push(`<div class="kapitel" data-zettel="${escapeHtml(entry.id)}" style="content-visibility:auto;contain-intrinsic-size:auto ${estimateHeight(entry)}px">${chapterHtml(entry, 2)}</div>`);
   }
   doc.innerHTML = parts.join("");
   loadOpenMisc();
   state.chapters = $$(".kapitel", doc);
   state.wholeKey = key;
-  buildMiniToc(entries);
   const target = entryById(id) && isVisible(entryById(id)) ? id : entries[0]?.id;
   state.view = { mode: "gesamt", id: target };
   state.currentWhole = null;
@@ -500,6 +527,7 @@ function showWhole(id, { offset = null } = {}) {
     scrollToChapter(target, false);
   }
   trackWhole();
+  nummernAlle();
 }
 
 const chapterGoal = () => readingTop() + 12; // Kapitelanfang knapp unter der Kopfleiste
@@ -567,27 +595,6 @@ window.addEventListener("keydown", (event) => {
   if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) stopSettling();
 });
 
-// Auch ein Klick auf das gerade markierte Kapitel springt an seinen Anfang (die Adresse ändert sich dabei nicht)
-mini.addEventListener("click", (event) => {
-  const link = event.target.closest("a[data-id]");
-  if (!link) return;
-  event.preventDefault();
-  go(`gesamt/${link.dataset.id}`);
-});
-
-function buildMiniToc(entries) {
-  const parts = [];
-  let lastSection = -1;
-  for (const entry of entries) {
-    if (entry.section !== lastSection) {
-      parts.push(`<div class="m-jahr">${escapeHtml(sectionName(entry))}</div>`);
-      lastSection = entry.section;
-    }
-    parts.push(`<a href="#gesamt/${escapeHtml(entry.id)}" data-id="${escapeHtml(entry.id)}" class="art-${entry.kind}" title="${escapeHtml(entry.title)}">${escapeHtml(entry.title)}</a>`);
-  }
-  mini.innerHTML = parts.join("");
-}
-
 function readingTop() {
   return $("header.bar").getBoundingClientRect().bottom;
 }
@@ -617,15 +624,8 @@ function trackWhole() {
   if (id === state.currentWhole) return;
   state.currentWhole = id;
   state.view = { mode: "gesamt", id };
-  const entry = entryById(id);
-  markCurrent(id);
-  updatePlace(entry);
-  $$("a.aktuell", mini).forEach((a) => a.classList.remove("aktuell"));
-  const link = mini.querySelector(`a[data-id="${CSS.escape(id)}"]`);
-  if (link) {
-    link.classList.add("aktuell");
-    scrollWithin(mini, link);
-  }
+  markCurrent(id); // das Inhaltsverzeichnis links zeigt, wo man gerade liest
+  updatePlace(entryById(id));
   history.replaceState(null, "", `#gesamt/${id}`);
 }
 
@@ -661,45 +661,154 @@ window.addEventListener("scroll", () => {
   });
 }, { passive: true });
 
-// ------------------------------------------------------------------ Bearbeiten
+// ------------------------------------------------------------------ Absatznummern (nur am Rand)
+// Der Text steht durchgehend da; die Nummern werden daneben gesetzt, wo ein Absatz beginnt
+// (ein Absatz ist eine Folge nicht leerer Zeilen – wie beim Schreibwerkzeug und für den Agenten).
 
-function domToText(node) {
-  let out = "";
-  for (const child of node.childNodes) {
-    if (child.nodeType === 3) {
-      out += child.nodeValue;
-    } else if (child.nodeType === 1) {
-      if (child.tagName === "BR") {
-        out += "\n";
-      } else if (child.tagName === "DIV" || child.tagName === "P") {
-        if (out && !out.endsWith("\n")) out += "\n";
-        out += domToText(child);
-      } else {
-        out += domToText(child);
-      }
+const sichtbar = new Set();
+const nummernSicht = new IntersectionObserver((items) => {
+  for (const item of items) {
+    if (item.isIntersecting) {
+      sichtbar.add(item.target);
+      if (!item.target.dataset.nummern) nummernSetzen(item.target);
+    } else {
+      sichtbar.delete(item.target);
     }
   }
-  return out;
+}, { rootMargin: "800px 0px" });
+
+function textStellen(ed) {
+  const stellen = []; // [Textknoten, Beginn im Klartext]
+  let plain = "";
+  const walker = document.createTreeWalker(ed, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (node.nodeType === 3) {
+      stellen.push([node, plain.length]);
+      plain += node.nodeValue;
+    } else if (node.tagName === "BR" && !node.hasAttribute("data-ende")) {
+      plain += "\n";
+    }
+  }
+  return { stellen, plain };
 }
 
-const cleanText = (text) => text.replace(/\r\n?/g, "\n").replace(/^\n+|\n+$/g, "");
+function knotenBei(stellen, offset) {
+  let lo = 0;
+  let hi = stellen.length - 1;
+  let found = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (stellen[mid][1] <= offset) {
+      found = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  // Ein Knoten, der genau hier endet, gehört nicht dazu (dann der nächste mit Text)
+  while (found >= 0 && found < stellen.length - 1 && offset >= stellen[found][1] + stellen[found][0].length) found += 1;
+  return found >= 0 ? stellen[found] : null;
+}
 
-function insertText(text) {
-  if (document.execCommand("insertText", false, text)) return;
-  const selection = window.getSelection();
-  if (!selection.rangeCount) return;
-  const range = selection.getRangeAt(0);
-  range.deleteContents();
-  const node = document.createTextNode(text);
-  range.insertNode(node);
-  range.setStartAfter(node);
-  range.collapse(true);
-  selection.removeAllRanges();
-  selection.addRange(range);
+function nummernSetzen(block) {
+  const gutter = $(".nummern", block);
+  const ed = $(".ed", block);
+  if (!gutter || !ed) return;
+  if (!settings.nummern || window.innerWidth <= 760) {
+    gutter.textContent = "";
+    delete block.dataset.nummern;
+    return;
+  }
+  block.dataset.nummern = "1";
+  const { stellen, plain } = textStellen(ed);
+  const oben = block.getBoundingClientRect().top;
+  const range = document.createRange();
+  const teile = [];
+  paragraphSpans(plain).forEach((span, i) => {
+    const found = knotenBei(stellen, span.start);
+    if (!found) return;
+    const [node, beginn] = found;
+    const at = Math.max(0, Math.min(span.start - beginn, node.length - 1));
+    range.setStart(node, at);
+    range.setEnd(node, Math.min(at + 1, node.length));
+    const rect = range.getClientRects()[0] || range.getBoundingClientRect();
+    teile.push(`<span style="top:${Math.round(rect.top - oben)}px">${i + 1}</span>`);
+  });
+  gutter.innerHTML = teile.join("");
+}
+
+function nummernAlle() {
+  const bloecke = $$('.blk.feld[data-feld="content"]', doc);
+  if (!settings.nummern) {
+    for (const block of bloecke) nummernSetzen(block);
+    return;
+  }
+  if (state.view?.mode === "gesamt") {
+    for (const block of bloecke) nummernSicht.observe(block);
+  } else {
+    for (const block of bloecke) nummernSetzen(block);
+  }
+}
+
+function nummernSichtbare() {
+  if (!settings.nummern) return;
+  if (state.view?.mode === "gesamt") for (const block of sichtbar) nummernSetzen(block);
+  else for (const block of $$('.blk.feld[data-feld="content"]', doc)) nummernSetzen(block);
+}
+
+const nummernTimer = new WeakMap();
+function nummernBald(block) {
+  if (!settings.nummern || !block) return;
+  clearTimeout(nummernTimer.get(block));
+  nummernTimer.set(block, setTimeout(() => nummernSetzen(block), 350));
+}
+
+// ------------------------------------------------------------------ Bearbeiten
+
+const feldVonEd = (ed) => ed.closest(".blk")?.dataset.feld || "content";
+
+/** Was im Feld steht: Text mit Formatcodes (Text), sonst reiner Text; ein Titel als eine Zeile. */
+function edText(ed) {
+  const feld = feldVonEd(ed);
+  const text = domLesen(ed, { formate: feld === "content" });
+  return feld === "title" ? titelZeile(text) : text;
 }
 
 function containerEntry(element) {
   return entryById(element.closest("[data-zettel]")?.dataset.zettel);
+}
+
+/** Endet der Text mit einer leeren Zeile, braucht sie einen Platzhalter, sonst ist sie unsichtbar. */
+function ensureEnde(ed) {
+  // Ein Platzhalter mitten im Text (dahinter wurde weitergeschrieben) ist eine echte Zeile
+  for (const br of $$("br[data-ende]", ed)) {
+    if (br !== ed.lastChild) br.replaceWith(document.createTextNode("\n"));
+  }
+  const last = ed.lastChild;
+  const hat = last?.nodeType === 1 && last.tagName === "BR" && last.hasAttribute("data-ende");
+  const endetLeer = domLesen(ed, { formate: false }).endsWith("\n");
+  if (endetLeer && !hat) {
+    const br = document.createElement("br");
+    br.setAttribute("data-ende", "");
+    ed.append(br);
+  } else if (!endetLeer && hat) {
+    last.remove();
+  }
+}
+
+function insertText(text) {
+  if (!document.execCommand("insertText", false, text)) {
+    const selection = window.getSelection();
+    if (!selection.rangeCount) return;
+    const range = selection.getRangeAt(0);
+    range.deleteContents();
+    const node = document.createTextNode(text);
+    range.insertNode(node);
+    range.setStartAfter(node);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
 }
 
 function setBlockState(block, status, detail = "") {
@@ -718,33 +827,24 @@ function setBlockState(block, status, detail = "") {
   }[status] || (block.classList.contains("bearbeitet") ? " · bearbeitet" : "");
   const zustand = $(".zustand", block);
   if (zustand) zustand.textContent = label;
+  if (leisteEd?.closest(".blk") === block) leisteZustand();
+}
+
+function setEdited(block, edited) {
+  if (!block?.isConnected) return;
+  block.classList.toggle("bearbeitet", edited);
+  const discard = $(':scope > .blk-tools [data-act="verwerfen"]', block);
+  if (discard) discard.hidden = !edited;
+  if (leisteEd?.closest(".blk") === block) leisteZustand();
 }
 
 const chapterContainer = (id) => doc.querySelector(`.kapitel[data-zettel="${CSS.escape(String(id))}"]`);
-
-/** Lage der Absätze nach dem Speichern neu setzen; passt die Zahl nicht mehr, wird neu gesetzt (rerender). */
-function respan(box, feld, text, onMismatch) {
-  if (!box) return;
-  const spans = paragraphSpans(text);
-  const blocks = $$(`.blk[data-feld="${feld}"]`, box);
-  if (blocks.length !== spans.length) {
-    onMismatch();
-    return;
-  }
-  blocks.forEach((b, i) => {
-    b.dataset.s = spans[i].start;
-    b.dataset.e = spans[i].end;
-    const ed = $(".ed", b);
-    if (ed?._sitzung) ed._sitzung.start = spans[i].start;
-  });
-}
 
 function updateEntryText(entry, text) {
   if (entry.text === text) return;
   entry.text = text;
   entry.words = countWords(text);
   state.wholeKey = null;
-  respan(chapterContainer(entry.id), "content", text, () => state.rerender.add(entry.id));
 }
 
 function updateMisc(entry, text) {
@@ -752,11 +852,14 @@ function updateMisc(entry, text) {
   entry.misc = text;
   entry.miscWords = countWords(text);
   state.wholeKey = null;
-  respan(chapterContainer(entry.id)?.querySelector("details.vermerke .vermerke-text"), "misc", text,
-    () => state.rerenderMisc.add(entry.id));
+  const details = chapterContainer(entry.id)?.querySelector("details.vermerke");
+  if (details) {
+    details.classList.toggle("leer", !entry.miscWords);
+    $("summary", details).textContent = vermerkeSumme(entry);
+  }
 }
 
-/** Neuer Titel: Inhaltsverzeichnis, Übersicht und Kopfzeile ziehen mit (die Art – Szene usw. – hängt am Titel). */
+/** Neuer Titel: Inhaltsverzeichnis und Kopfzeile ziehen mit (die Art – Szene usw. – hängt am Titel). */
 function updateTitle(entry, text) {
   if (entry.title === text) return;
   const kind = kindOf(text);
@@ -766,16 +869,7 @@ function updateTitle(entry, text) {
     e.kind = kind;
   }
   state.wholeKey = null;
-  for (const block of $$(`.kapitel[data-zettel="${CSS.escape(entry.id)}"] .blk[data-feld="title"]`, doc)) block.dataset.e = text.length;
-  if (same.length) {
-    buildToc();
-    for (const link of $$(`a[data-id="${CSS.escape(entry.id)}"]`, mini)) {
-      link.textContent = text;
-      link.title = text;
-      link.classList.remove("art-szene", "art-jahr", "art-sonstiges");
-      link.classList.add(`art-${kind}`);
-    }
-  }
+  if (same.length) buildToc();
   if (String(state.view?.id) === entry.id) updatePlace(entry.pos ? entry : null, shownTitle(entry));
 }
 
@@ -785,21 +879,42 @@ function updateField(entry, feld, text) {
   else updateEntryText(entry, text);
 }
 
-function rememberEdit(session, nachher) {
-  // session.erst: Wortlaut vor der ersten Bearbeitung; session.shown: zuletzt gespeicherter Wortlaut
-  state.edited.delete(editKey(session.zettel, session.feld, session.shown));
-  if (nachher !== session.erst) state.edited.set(editKey(session.zettel, session.feld, nachher), session.erst);
-  session.shown = nachher;
-  return nachher !== session.erst;
+/** Merkt, was vor der ersten Bearbeitung dastand (für „Bearbeitung verwerfen“). */
+function merkeBearbeitung(session, jetzt) {
+  const key = fkey(session.zettel, session.feld);
+  const erst = state.edited.get(key)?.erst ?? session.ursprung;
+  if (jetzt === erst) state.edited.delete(key);
+  else state.edited.set(key, { erst, jetzt });
+  return jetzt !== erst;
 }
 
-function handleSaveResult(entry, block, session, nachher, result) {
+/** Die Änderung einer Eingabe: beim Titel der ganze Titel, sonst die geänderten Zeilen. */
+function aenderungVon(session, jetzt) {
+  if (session.feld === "title") return jetzt === session.raw ? null : { start: 0, vorher: session.raw, nachher: jetzt };
+  return zeilenAenderung(session.raw, session.basis, jetzt);
+}
+
+const gleicheAenderung = (a, b) => Boolean(a && b) && a.start === b.start && a.vorher === b.vorher && a.nachher === b.nachher;
+
+function startSitzung(ed, { ausDemZettel = false } = {}) {
+  const block = ed.closest(".blk");
+  const entry = containerEntry(ed);
+  if (!entry || !block) return null;
+  const feld = block.dataset.feld || "content";
+  const raw = fieldText(entry, feld);
+  // basis: derselbe Stand, wie der Browser ihn zurückliest (sonst – wenn schon getippt wurde – der Zettel)
+  ed._sitzung = { id: uid(), zettel: entry.id, feld, raw, basis: feld === "title" || ausDemZettel ? raw : edText(ed),
+    ursprung: raw, sent: false, letzte: null, gesendet: null };
+  return ed._sitzung;
+}
+
+function handleSaveResult(entry, block, session, result) {
   if (result.stand || result.version) state.version = result.stand || result.version;
   if (result.bearbeitung) updateEditStatus(result.bearbeitung);
   if (result.git) updateGit(result.git); // unterwegs: „Gesichert“, sobald die Änderung auf GitHub ist
   if (result.status === "konflikt") {
     setBlockState(block, "konflikt", result.meldung || "");
-    toast("Dieser Absatz wurde inzwischen anderswo geändert", "Deine Fassung ist nicht gespeichert – kopiere sie, bevor du neu lädst.", 12000);
+    toast("Diese Stelle wurde inzwischen anderswo geändert", "Deine Fassung ist nicht gespeichert – kopiere sie, bevor du neu lädst.", 12000);
     return;
   }
   if (result.status === "fehler") {
@@ -807,17 +922,14 @@ function handleSaveResult(entry, block, session, nachher, result) {
     toast("Speichern ist fehlgeschlagen", result.meldung || "", 10000);
     return;
   }
-  if (typeof result.text === "string") updateField(entry, session.feld, result.text);
-  const marked = rememberEdit(session, nachher);
-  if (block?.isConnected) {
-    block.classList.toggle("bearbeitet", marked);
-    const discard = $('[data-act="verwerfen"]', block);
-    if (discard) discard.hidden = !marked;
-    // Ein fertiger Titel steht so da, wie er gespeichert ist (eine Zeile, ohne Leerraum am Rand)
-    const ed = $(".ed", block);
-    if (session.feld === "title" && session.fertig && ed && document.activeElement !== ed && ed.textContent !== entry.title) {
-      ed.textContent = entry.title;
-    }
+  if (typeof result.text === "string") {
+    updateField(entry, session.feld, result.text);
+    setEdited(block, merkeBearbeitung(session, result.text));
+  }
+  // Ein fertiger Titel steht so da, wie er gespeichert ist (eine Zeile, ohne Leerraum am Rand)
+  const ed = block?.isConnected ? $(":scope > .ed", block) : null;
+  if (session.feld === "title" && session.fertig && ed && document.activeElement !== ed && ed.textContent !== entry.title) {
+    ed.textContent = entry.title;
   }
   const outcome = result.einspielen?.status;
   if (outcome === "wartet") setBlockState(block, "wartet");
@@ -831,6 +943,11 @@ function handleSaveResult(entry, block, session, nachher, result) {
   else setBlockState(block, null);
 }
 
+function senden(session, change, fertig) {
+  return quelle.aendern({ zettel: session.zettel, feld: session.feld, start: change.start, vorher: change.vorher,
+    nachher: change.nachher, sitzung: session.id, fertig });
+}
+
 function save(ed, fertig) {
   const session = ed._sitzung;
   if (!session) return Promise.resolve();
@@ -841,115 +958,180 @@ function save(ed, fertig) {
   const block = ed.closest(".blk");
   const run = async () => {
     const entry = entryById(session.zettel);
-    let nachher = cleanText(domToText(ed));
-    if (session.feld === "title") {
-      nachher = titelZeile(nachher);
-      if (!nachher) {
-        if (!fertig) return; // ein leerer Titel wird nicht gespeichert
-        ed.textContent = session.shown; // zurück zum zuletzt gespeicherten Titel
-        nachher = session.shown;
-        if (session.shown) toast("Ein Titel darf nicht leer sein", "Der bisherige Titel bleibt stehen.", 5000);
+    let jetzt = edText(ed);
+    if (session.feld === "title" && !jetzt) {
+      if (!fertig) return; // ein leerer Titel wird nicht gespeichert
+      jetzt = session.letzte ? session.letzte.nachher : session.raw; // zurück zum zuletzt gespeicherten Titel
+      ed.textContent = jetzt;
+      if (jetzt) toast("Ein Titel darf nicht leer sein", "Der bisherige Titel bleibt stehen.", 5000);
+    }
+    let change = aenderungVon(session, jetzt);
+    if (!change) {
+      if (!session.sent) {
+        setBlockState(block, null);
+        return;
       }
+      change = { ...session.letzte, nachher: session.letzte.vorher }; // wieder wie am Anfang: zurücknehmen
     }
-    if (!session.sent && nachher === session.original) {
-      setBlockState(block, null);
-      return;
-    }
-    if (!fertig && nachher === session.last) return;
+    if (!fertig && gleicheAenderung(change, session.letzte)) return;
     session.sent = true;
-    session.last = nachher;
     setBlockState(block, "speichert");
     state.saving += 1;
     try {
-      const result = await quelle.aendern({
-        zettel: session.zettel, feld: session.feld, start: session.start, vorher: session.original, nachher,
-        sitzung: session.id, fertig,
-      });
-      handleSaveResult(entry, block, session, nachher, result);
+      let result = await senden(session, change, fertig);
+      if (result.status === "neu-ansetzen") {
+        // Was in dieser Eingabe bisher geschrieben wurde, ist schon eingespielt: von dort aus weiter
+        session.raw = result.text;
+        session.basis = session.gesendet ?? session.basis;
+        session.id = uid();
+        session.letzte = null;
+        change = aenderungVon(session, jetzt);
+        if (!change) {
+          session.sent = false;
+          handleSaveResult(entry, block, session, { ...result, status: "unveraendert" });
+          return;
+        }
+        result = await senden(session, change, fertig);
+      }
+      session.letzte = change;
+      session.gesendet = jetzt;
+      handleSaveResult(entry, block, session, result);
     } catch (err) {
       setBlockState(block, "fehler", err.message);
-      toast("Speichern ist fehlgeschlagen", `${err.message} – der Text steht noch im Absatz.`, 10000);
+      toast("Speichern ist fehlgeschlagen", `${err.message} – der Text steht noch im Feld.`, 10000);
     } finally {
       state.saving -= 1;
     }
   };
   session.chain = (session.chain || Promise.resolve()).then(run, run);
-  return session.chain.then(() => { if (fertig) setTimeout(afterEditing, 0); });
+  ed._kette = session.chain;
+  return session.chain.then(() => { if (fertig) setTimeout(() => nachEingabe(ed), 0); });
 }
 
-function afterEditing() {
-  if (document.activeElement?.closest?.(".ed")) return;
-  if (state.rerender.size) {
-    const y = window.scrollY;
-    const ids = [...state.rerender];
-    state.rerender.clear();
-    if (state.view?.mode === "kapitel" && ids.includes(String(state.view.id))) showChapter(state.view.id, { restore: y, toHit: false });
-    else if (state.view?.mode === "gesamt") for (const id of ids) replaceWholeChapter(id);
-    else if (state.view?.mode === "zettel" && ids.includes(String(state.view.id))) showZettel(state.view.id, { restore: y });
-    window.scrollTo(0, y);
+/** Stelle der Auswahl im Klartext eines Feldes (zum Wiederherstellen nach dem Neusetzen). */
+function auswahlIn(ed) {
+  const selection = window.getSelection();
+  if (!selection.rangeCount || !ed.contains(selection.anchorNode)) return null;
+  const range = selection.getRangeAt(0);
+  const vor = (container, offset) => {
+    const r = document.createRange();
+    r.selectNodeContents(ed);
+    r.setEnd(container, offset);
+    return domLesen(r.cloneContents(), { formate: false }).length;
+  };
+  return { start: vor(range.startContainer, range.startOffset), end: vor(range.endContainer, range.endOffset) };
+}
+
+function setzeAuswahl(ed, stelle) {
+  if (!stelle) return;
+  const { stellen } = textStellen(ed);
+  const punkt = (offset) => {
+    const found = knotenBei(stellen, offset);
+    if (!found) return [ed, ed.childNodes.length];
+    return [found[0], Math.max(0, Math.min(offset - found[1], found[0].length))];
+  };
+  const range = document.createRange();
+  range.setStart(...punkt(stelle.start));
+  range.setEnd(...punkt(stelle.end));
+  const selection = window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
+}
+
+/** Nach einer Eingabe: das Feld so setzen, wie es gespeichert ist (Anmerkungen, Formatierung, Zeilen). */
+function feldNeuSetzen(ed) {
+  const block = ed.closest(".blk");
+  const entry = containerEntry(ed);
+  if (!entry || !block || ed._sitzung) return;
+  const feld = block.dataset.feld || "content";
+  if (feld === "title") {
+    if (ed.textContent !== entry.title) ed.textContent = entry.title;
+  } else {
+    const aktiv = document.activeElement === ed;
+    const stelle = aktiv ? auswahlIn(ed) : null;
+    const { html } = feldInnen(entry, feld);
+    if (ed.innerHTML !== html) {
+      ed.innerHTML = html;
+      if (aktiv) setzeAuswahl(ed, stelle);
+    }
+    if (feld === "content") nummernBald(block);
   }
-  for (const id of state.rerenderMisc) {
-    const entry = entryById(id);
-    const details = chapterContainer(id)?.querySelector("details.vermerke[data-geladen]");
-    if (entry && details) $(".vermerke-text", details).innerHTML = miscHtml(entry, details.dataset.tools === "1");
-  }
-  state.rerenderMisc.clear();
-  if (state.reloadWanted && !state.saving) {
+  setEdited(block, istBearbeitet(entry, feld));
+}
+
+function nachEingabe(ed) {
+  if (ed.isConnected && !ed._sitzung && !(document.activeElement === ed && document.hasFocus())) feldNeuSetzen(ed);
+  if (state.reloadWanted && !state.saving && !document.activeElement?.closest?.("#doc .ed")) {
     state.reloadWanted = false;
     poll();
   }
 }
 
-function replaceWholeChapter(id) {
-  const entry = entryById(id);
-  const container = doc.querySelector(`.kapitel[data-zettel="${CSS.escape(String(id))}"]`);
-  if (!entry || !container) return;
-  hitCounter = 0;
-  container.innerHTML = chapterHtml(entry, { level: 2, tools: false });
-  loadOpenMisc();
-}
-
 doc.addEventListener("focusin", (event) => {
   const ed = event.target.closest?.(".ed");
-  if (!ed || ed._sitzung) return;
-  const block = ed.closest(".blk");
-  const entry = containerEntry(ed);
-  if (!entry || !block) return;
-  const feld = block.dataset.feld || "content";
-  const text = feld === "title" ? entry.title : cleanText(domToText(ed));
-  ed._sitzung = { id: uid(), zettel: entry.id, feld, original: text, start: Number(block.dataset.s), sent: false,
-    shown: text, erst: state.edited.get(editKey(entry.id, feld, text)) ?? text };
+  if (!ed) return;
+  const blk = ed.closest(".md-blk");
+  if (blk) {
+    // Ein Material-Block, der noch zum Bearbeiten offen steht (sein Text ist schon gespeichert)
+    if (!ed._material && state.view?.mode === "material") {
+      ed._material = { id: uid(), datei: state.view.path, start: Number(blk.dataset.s), vorher: domLesen(ed, { formate: false }) };
+    }
+    versteckeLeiste();
+    return;
+  }
+  if (!ed._sitzung) startSitzung(ed);
+  zeigeLeiste(ed);
 });
 
-const isTitle = (ed) => ed.closest(".blk")?.dataset.feld === "title";
+// Steht die Schreibmarke in einem Text, gehört die Schreibleiste dazu (auch wenn ein Browser kein focusin meldet)
+document.addEventListener("selectionchange", () => {
+  const ed = document.activeElement?.closest?.("#doc .ed");
+  if (ed && !ed.closest(".md-blk") && leisteEd !== ed && feldVonEd(ed) !== "title") zeigeLeiste(ed);
+});
 
 doc.addEventListener("input", (event) => {
   const ed = event.target.closest?.(".ed");
-  if (!ed?._sitzung) return;
+  if (!ed) return;
+  ensureEnde(ed);
+  if (ed.closest(".md-blk")) return;
+  if (leisteEd !== ed && feldVonEd(ed) !== "title") zeigeLeiste(ed);
+  if (!ed._sitzung && !startSitzung(ed, { ausDemZettel: true })) return; // ohne focusin (manche Browser)
   setBlockState(ed.closest(".blk"), "ungespeichert");
   clearTimeout(ed._timer);
   ed._timer = setTimeout(() => save(ed, false), 1500);
+  if (feldVonEd(ed) === "content") nummernBald(ed.closest(".blk"));
 });
 
 doc.addEventListener("focusout", (event) => {
   const ed = event.target.closest?.(".ed");
   if (!ed) return;
+  if (ed.closest(".md-blk")) {
+    materialFertig(ed);
+    return;
+  }
   clearTimeout(ed._timer);
   if (ed._sitzung) save(ed, true);
+  if (!leiste.contains(event.relatedTarget)) versteckeLeiste();
 });
+
+const FORMAT_TASTEN = { b: "bold", i: "italic", u: "underline" };
 
 doc.addEventListener("keydown", (event) => {
   const ed = event.target.closest?.(".ed");
   if (!ed) return;
+  const material = Boolean(ed.closest(".md-blk"));
   if (event.key === "Enter" && !event.isComposing) {
     event.preventDefault();
-    if (isTitle(ed)) ed.blur(); // ein Titel ist eine Zeile: Enter beendet die Eingabe
+    if (!material && feldVonEd(ed) === "title") ed.blur(); // ein Titel ist eine Zeile: Enter beendet die Eingabe
     else insertText(event.shiftKey ? "\n\n" : "\n"); // Enter: neue Zeile, Umschalt+Enter: neuer Absatz
   } else if (event.key === "Escape") {
     event.preventDefault();
     ed.blur();
-  } else if ((event.ctrlKey || event.metaKey) && ["b", "i", "u"].includes(event.key.toLowerCase())) {
-    event.preventDefault(); // keine Formatierungen: die zkn3 kennt hier nur Text
+  } else if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && FORMAT_TASTEN[event.key.toLowerCase()]) {
+    event.preventDefault();
+    const was = FORMAT_TASTEN[event.key.toLowerCase()];
+    if (material) markdownFormat(was);
+    else if (feldVonEd(ed) === "content") formatieren(was); // Titel und Vermerke bleiben reiner Text
   }
 }, true);
 
@@ -958,7 +1140,7 @@ doc.addEventListener("paste", (event) => {
   if (!ed) return;
   event.preventDefault();
   const text = (event.clipboardData?.getData("text/plain") || "").replace(/\r\n?/g, "\n");
-  insertText(isTitle(ed) ? text.replace(/\s*\n\s*/g, " ") : text);
+  insertText(!ed.closest(".md-blk") && feldVonEd(ed) === "title" ? text.replace(/\s*\n\s*/g, " ") : text);
 });
 
 doc.addEventListener("drop", (event) => {
@@ -970,51 +1152,62 @@ window.addEventListener("pagehide", () => {
   for (const ed of $$(".ed")) {
     const session = ed._sitzung;
     if (!session) continue;
-    let nachher = cleanText(domToText(ed));
-    if (session.feld === "title") nachher = titelZeile(nachher) || session.shown;
-    if (nachher === session.original && !session.sent) continue;
-    bodies.push({ zettel: session.zettel, feld: session.feld, start: session.start, vorher: session.original, nachher,
-      sitzung: session.id, fertig: true });
+    let jetzt = edText(ed);
+    if (session.feld === "title" && !jetzt) jetzt = session.raw;
+    const change = aenderungVon(session, jetzt) || (session.sent ? { ...session.letzte, nachher: session.letzte.vorher } : null);
+    if (!change) continue;
+    bodies.push({ zettel: session.zettel, feld: session.feld, start: change.start, vorher: change.vorher,
+      nachher: change.nachher, sitzung: session.id, fertig: true });
   }
   if (bodies.length && quelle) quelle.verlassen(bodies);
+  for (const ed of $$(".md-blk .ed")) {
+    const sitzung = ed._material;
+    const jetzt = sitzung ? domLesen(ed, { formate: false }) : null;
+    if (sitzung && jetzt !== sitzung.vorher) quelle?.materialVerlassen?.({ ...sitzung, nachher: jetzt });
+  }
+  quelle?.fensterZu?.();
 });
 
 async function discardEdit(entry, block) {
-  const ed = $(".ed", block);
   const feld = block.dataset.feld || "content";
-  const current = feld === "title" ? entry.title : fieldText(entry, feld).slice(Number(block.dataset.s), Number(block.dataset.e));
-  const original = state.edited.get(editKey(entry.id, feld, current));
-  if (original === undefined || !ed) return;
+  const key = fkey(entry.id, feld);
+  const info = state.edited.get(key);
+  if (!info) return;
+  const change = feld === "title" ? { start: 0, vorher: fieldText(entry, feld), nachher: info.erst }
+    : zeilenAenderung(info.jetzt, info.jetzt, info.erst);
+  const ed = $(":scope > .ed", block);
+  if (!change || !ed) {
+    state.edited.delete(key);
+    if (ed) feldNeuSetzen(ed);
+    return;
+  }
   try {
-    const result = await quelle.aendern({ zettel: entry.id, feld, start: Number(block.dataset.s), vorher: current,
-      nachher: original, sitzung: uid(), fertig: true });
+    const result = await quelle.aendern({ zettel: entry.id, feld, start: change.start, vorher: change.vorher,
+      nachher: change.nachher, sitzung: uid(), fertig: true });
     if (result.status === "konflikt" || result.status === "fehler") {
       toast("Verwerfen ging nicht", result.meldung || "", 9000);
       return;
     }
     if (result.stand || result.version) state.version = result.stand || result.version;
     if (result.bearbeitung) updateEditStatus(result.bearbeitung);
-    state.edited.delete(editKey(entry.id, feld, current));
+    if (result.git) updateGit(result.git);
+    state.edited.delete(key);
     if (typeof result.text === "string") updateField(entry, feld, result.text);
-    if (state.rerender.has(entry.id) || state.rerenderMisc.has(entry.id)) {
-      afterEditing();
-    } else {
-      if (feld === "title") ed.textContent = original;
-      else ed.innerHTML = editableHtml(original).html;
-      block.classList.remove("bearbeitet");
-      $('[data-act="verwerfen"]', block).hidden = true;
-      setBlockState(block, null);
-    }
-    toast("Bearbeitung verworfen", feld === "title" ? "Der Titel steht wieder wie vorher." : "Der Absatz steht wieder wie vorher.");
+    feldNeuSetzen(ed);
+    setBlockState(block, null);
+    toast("Bearbeitung verworfen", { title: "Der Titel steht wieder wie vorher.", misc: "Die Vermerke stehen wieder wie vorher." }[feld]
+      || "Der Text steht wieder wie vorher.");
   } catch (err) {
     toast("Verwerfen ging nicht", err.message, 9000);
   }
 }
 
-/** Was „Kopieren“ in die Zwischenablage legt: Überschrift und Text, so wie sie dastehen – ohne Vermerke und Angaben. */
+/** Was „Kopieren“ in die Zwischenablage legt: Überschrift und Text (ohne Formatcodes, Vermerke und Angaben). */
 function copyText(container) {
-  const title = titelZeile(domToText($('.blk[data-feld="title"] .ed', container)));
-  const paragraphs = $$('.blk[data-feld="content"] .ed', container).map((ed) => cleanText(domToText(ed))).filter((p) => p.trim());
+  const title = titelZeile(domLesen($('.blk[data-feld="title"] .ed', container), { formate: false }));
+  const ed = $('.blk[data-feld="content"] .ed', container);
+  const text = ed ? domLesen(ed, { formate: false }) : "";
+  const paragraphs = paragraphSpans(text).map((s) => text.slice(s.start, s.end));
   return [title, ...paragraphs].filter(Boolean).join("\n\n");
 }
 
@@ -1062,10 +1255,107 @@ doc.addEventListener("click", (event) => {
     return;
   }
   const button = event.target.closest('[data-act="verwerfen"]');
-  if (!button) return;
-  const entry = containerEntry(button);
-  if (entry) discardEdit(entry, button.closest(".blk"));
+  if (button) {
+    const entry = containerEntry(button);
+    if (entry) discardEdit(entry, button.closest(".blk"));
+    return;
+  }
+  const blk = event.target.closest?.(".md-blk");
+  if (blk && !blk.classList.contains("bearbeiten") && !event.target.closest("a[href]") && !String(window.getSelection()).trim()) {
+    materialBearbeiten(blk, event);
+  }
 });
+
+// ------------------------------------------------------------------ Schreibleiste: fett, kursiv, Farbe …
+// Erscheint oben rechts am Blatt, solange in einem Text oder in den Vermerken geschrieben wird.
+
+let leisteEd = null;
+
+function zeigeLeiste(ed) {
+  const feld = feldVonEd(ed);
+  if (feld === "title") {
+    versteckeLeiste();
+    return;
+  }
+  leisteEd = ed;
+  $(".formate", leiste).hidden = feld !== "content";
+  leisteZustand();
+  leiste.hidden = false;
+  leistePlatz();
+}
+
+function versteckeLeiste() {
+  leiste.hidden = true;
+  leisteEd = null;
+  $(".farbwahl", leiste).hidden = true;
+}
+
+function leistePlatz() {
+  if (!leiste || leiste.hidden) return;
+  leiste.style.top = `${Math.round(readingTop() + 8)}px`;
+  const box = doc.getBoundingClientRect();
+  leiste.style.right = window.innerWidth <= 760 ? "8px" : `${Math.max(8, Math.round(window.innerWidth - box.right + 10))}px`;
+}
+
+function leisteZustand() {
+  const block = leisteEd?.closest(".blk");
+  if (!block) return;
+  $(".leiste-tag", leiste).textContent = $(":scope > .blk-tools .tag", block)?.textContent || "";
+  $(".leiste-tag", leiste).classList.toggle("konflikt", block.classList.contains("konflikt"));
+  $('[data-act="leiste-verwerfen"]', leiste).hidden = !block.classList.contains("bearbeitet");
+}
+
+function planeSpeichern(ed) {
+  if (!ed) return;
+  if (!ed._sitzung) startSitzung(ed, { ausDemZettel: true });
+  setBlockState(ed.closest(".blk"), "ungespeichert");
+  clearTimeout(ed._timer);
+  ed._timer = setTimeout(() => save(ed, false), 1500);
+}
+
+function formatieren(befehl, wert) {
+  const ed = document.activeElement?.closest?.(".ed");
+  if (!ed || feldVonEd(ed) !== "content" || ed.closest(".md-blk")) return;
+  document.execCommand(befehl, false, wert ?? null);
+  ensureEnde(ed);
+  planeSpeichern(ed); // nicht jeder Browser meldet Formatierungen als Eingabe
+}
+
+/** Im Material (Markdown): **fett**, *kursiv* um die Auswahl. */
+function markdownFormat(was) {
+  const zeichen = { bold: "**", italic: "*" }[was];
+  if (!zeichen) return;
+  insertText(`${zeichen}${String(window.getSelection())}${zeichen}`);
+}
+
+function baueLeiste() {
+  $(".farbwahl", leiste).innerHTML = [...FARBEN, [OHNE_FARBE, "Standardfarbe"]].map(([farbe, name]) =>
+    `<button type="button" class="farbe${farbe === OHNE_FARBE ? " ohne" : ""}" data-farbe="${farbe}" title="${name}" aria-label="${name}"${farbe === OHNE_FARBE ? "" : ` style="--f:${farbe}"`}></button>`).join("");
+  // Die Leiste nimmt der Eingabe nie die Schreibmarke (sonst ginge die Auswahl verloren)
+  leiste.addEventListener("mousedown", (event) => event.preventDefault());
+  leiste.addEventListener("click", async (event) => {
+    const button = event.target.closest("button");
+    if (!button) return;
+    if (button.dataset.fmt) formatieren(button.dataset.fmt);
+    else if (button.dataset.act === "farben") $(".farbwahl", leiste).hidden = !$(".farbwahl", leiste).hidden;
+    else if (button.dataset.farbe) {
+      formatieren("foreColor", button.dataset.farbe);
+      $(".farbwahl", leiste).hidden = true;
+    } else if (button.dataset.act === "leiste-verwerfen" && leisteEd) {
+      const ed = leisteEd;
+      const block = ed.closest(".blk");
+      const entry = containerEntry(ed);
+      ed.blur();
+      await (ed._kette || Promise.resolve());
+      if (entry && block) discardEdit(entry, block);
+    }
+  });
+  try {
+    document.execCommand("styleWithCSS", false, false); // fett als <b> usw., nicht als style-Angabe
+  } catch {
+    /* ältere Browser */
+  }
+}
 
 // ------------------------------------------------------------------ Inspektor: Suche, Hinweise
 
@@ -1090,7 +1380,7 @@ $("#insp-close").addEventListener("click", closeInsp);
 document.addEventListener("click", (event) => {
   if (insp.hidden) return;
   const target = event.target;
-  if (insp.contains(target) || target === searchInput || target.closest?.("[data-oeffnet]")) return;
+  if (!target.isConnected || insp.contains(target) || target === searchInput || target.closest?.("[data-oeffnet]")) return;
   closeInsp();
 });
 
@@ -1117,14 +1407,15 @@ function runSearch(raw) {
   state.wholeKey = null;
   const results = [];
   for (const entry of state.book.entries) {
-    const found = findAll(entry.text, term);
-    if (found.length) results.push({ entry, found });
+    const plain = klartext(entry.text); // gesucht wird im Text, wie er dasteht (ohne Formatcodes)
+    const found = findAll(plain, term).filter((hit) => !plain.slice(hit.index, hit.index + hit.length).includes("\n"));
+    if (found.length) results.push({ entry, plain, found });
   }
   const total = results.reduce((n, r) => n + r.found.length, 0);
   const parts = [`<p class="treffer-kopf">${formatNumber(total)} Treffer in ${formatNumber(results.length)} Kapiteln · <a href="#" id="suche-alle">auch in allen übrigen Zetteln suchen</a></p>`];
-  for (const { entry, found } of results) {
+  for (const { entry, plain, found } of results) {
     parts.push(`<div class="treffer-kap">${escapeHtml(entry.title)} <span class="hint">${found.length}</span></div>`);
-    found.slice(0, 5).forEach((hit, n) => parts.push(`<a class="treffer" href="#kapitel/${escapeHtml(entry.id)}" data-id="${escapeHtml(entry.id)}" data-n="${n}">${snippetHtml(entry.text, hit.index, hit.length)}</a>`));
+    found.slice(0, 5).forEach((hit, n) => parts.push(`<a class="treffer" href="#kapitel/${escapeHtml(entry.id)}" data-id="${escapeHtml(entry.id)}" data-n="${n}">${snippetHtml(plain, hit.index, hit.length)}</a>`));
     if (found.length > 5) parts.push(`<p class="hint">… und ${found.length - 5} weitere in diesem Kapitel</p>`);
   }
   if (!results.length) parts.push('<p class="hint">Im Roman nichts gefunden.</p>');
@@ -1166,7 +1457,7 @@ insp.addEventListener("click", (event) => {
 });
 
 function removeMarks() {
-  // Markierungen direkt entfernen – auch in einem Absatz, in dem gerade geschrieben wird
+  // Markierungen direkt entfernen – auch in einem Feld, in dem gerade geschrieben wird
   for (const mark of $$("mark.treffer, mark.treffer-v", doc)) {
     const parent = mark.parentNode;
     mark.replaceWith(...mark.childNodes);
@@ -1183,7 +1474,7 @@ function clearSearch() {
 }
 
 function refreshView() {
-  if (document.activeElement?.closest?.(".ed")) return;
+  if (document.activeElement?.closest?.("#doc .ed")) return;
   const v = state.view;
   const y = window.scrollY;
   if (v?.mode === "kapitel") showChapter(v.id, { restore: y, toHit: false });
@@ -1207,9 +1498,12 @@ function updateDesktopButton() {
 function changeItem(change, actions) {
   const when = change.eingespielt || change.geaendert || change.erstellt;
   const buttons = actions.map(([action, label]) => `<button class="tb" data-aktion="${action}" data-id="${escapeHtml(change.id)}">${label}</button>`).join("");
-  const herkunft = change.unterwegs ? ` · ${change.geraet === "Chromebook" ? "vom Chromebook" : "von unterwegs"}` : "";
+  const herkunft = change.unterwegs || String(change.id || "").startsWith("u-") ? ` · ${change.geraet === "Chromebook" ? "vom Chromebook" : "von unterwegs"}` : "";
   const feld = { title: " · Titel", misc: " · Sonstige Vermerke" }[change.feld] || "";
-  return `<li><div class="wo">${escapeHtml(formatDate(when))}${herkunft} · <a href="#kapitel/${escapeHtml(change.zettel)}">${escapeHtml(change.titel || `Zettel ${change.zettel}`)}</a>${feld}${change.grund ? ` · ${escapeHtml(change.grund)}` : ""}</div>`
+  const wo = change.datei
+    ? `<a href="#material/${escapeHtml(change.datei)}">${escapeHtml(change.datei)}</a>`
+    : `<a href="#kapitel/${escapeHtml(change.zettel)}">${escapeHtml(change.titel || `Zettel ${change.zettel}`)}</a>`;
+  return `<li><div class="wo">${escapeHtml(formatDate(when))}${herkunft} · ${wo}${feld}${change.grund ? ` · ${escapeHtml(change.grund)}` : ""}</div>`
     + `<span class="vorher">${escapeHtml(change.vorher || "")}</span><span class="nachher">${escapeHtml(change.nachher || "(gelöscht)")}</span>${buttons}</li>`;
 }
 
@@ -1224,7 +1518,7 @@ async function openProblems() {
     const parts = [];
     if (o.fehler) parts.push(`<p class="hint">Beim letzten Einspielen: ${escapeHtml(o.fehler)}</p>`);
     if (o.verloren.length) parts.push(`<h4>Fehlen wieder in der zkn3</h4><p class="hint">Diese Änderungen waren eingespielt, stehen aber nicht mehr im Zettel – vermutlich hat das Zettelkasten-Programm einen älteren Stand gespeichert.</p><ul class="aend-liste">${o.verloren.map((c) => changeItem(c, [["erneut", "Erneut einspielen"], ["ignorieren", "Ist in Ordnung"]])).join("")}</ul>`);
-    if (o.konflikte.length) parts.push(`<h4>Konflikte</h4><p class="hint">Der Absatz wurde anderswo geändert, deshalb ist deine Fassung nicht eingespielt. Kopiere sie bei Bedarf und verwirf den Eintrag dann.</p><ul class="aend-liste">${o.konflikte.map((c) => changeItem(c, [["verwerfen", "Verwerfen"]])).join("")}</ul>`);
+    if (o.konflikte.length) parts.push(`<h4>Konflikte</h4><p class="hint">Die Stelle wurde anderswo geändert, deshalb ist deine Fassung nicht eingespielt. Kopiere sie bei Bedarf und verwirf den Eintrag dann.</p><ul class="aend-liste">${o.konflikte.map((c) => changeItem(c, [["verwerfen", "Verwerfen"]])).join("")}</ul>`);
     if (o.offen.length) parts.push(`<h4>Noch nicht in der zkn3</h4><p class="hint">${o.programm ? "Das Zettelkasten-Programm ist geöffnet – sie kommen hinein, sobald du es schließt." : "Sie werden gleich eingespielt."}</p><ul class="aend-liste">${o.offen.map((c) => changeItem(c, [])).join("")}</ul>`);
     if (!parts.length) parts.push('<p class="hint">Alles ist eingespielt.</p>');
     $("#insp-body").innerHTML = parts.join("");
@@ -1249,7 +1543,9 @@ insp.addEventListener("click", async (event) => {
   }
 });
 
-// ------------------------------------------------------------------ Material und Zettel außerhalb der Anordnung
+// ------------------------------------------------------------------ Material: lesen und blockweise bearbeiten
+// Jeder Block (Überschrift, Absatz, Liste, Tabelle …) steht gesetzt da. Ein Klick zeigt ihn als
+// Markdown zum Bearbeiten; Esc oder ein Klick daneben speichert ihn und setzt ihn wieder.
 
 function resolvePath(base, href) {
   try {
@@ -1257,6 +1553,48 @@ function resolvePath(base, href) {
   } catch {
     return href;
   }
+}
+
+/** Die Blöcke einer Markdown-Datei mit ihrer Lage im Text – oder null, wenn das nicht aufgeht. */
+function materialBloecke(text) {
+  let tokens;
+  try {
+    tokens = marked.lexer(text, { gfm: true });
+  } catch {
+    return null;
+  }
+  let pos = 0;
+  const parts = [];
+  for (const token of tokens) {
+    const raw = token.raw ?? "";
+    if (text.slice(pos, pos + raw.length) !== raw) return null;
+    const start = pos;
+    pos += raw.length;
+    if (token.type === "space" || !raw.trim()) continue;
+    const quelltext = raw.replace(/\n+$/, "");
+    const html = marked.parser(Object.assign([token], { links: tokens.links }), { gfm: true });
+    parts.push(`<div class="md-blk" data-s="${start}" data-e="${start + quelltext.length}">${html}</div>`);
+  }
+  return pos === text.length ? parts.join("") : null;
+}
+
+function zeigeMaterial(path, { scroll = null } = {}) {
+  const item = state.material.find((m) => m.path === path);
+  const bloecke = materialBloecke(state.materialText);
+  doc.innerHTML = `<div class="md" data-datei="${escapeHtml(path)}"><span class="kap-ort">Material · ${escapeHtml(item?.group ?? "")}${bloecke === null ? " · nur lesen" : ""}</span>`
+    + `${bloecke ?? marked.parse(state.materialText, { gfm: true })}${bloecke === "" ? '<div class="md-blk" data-s="0" data-e="0"><p class="hint">Leer – hineinklicken und schreiben</p></div>' : ""}</div>`;
+  for (const a of $$("a[href]", doc)) {
+    const href = a.getAttribute("href");
+    if (/^[a-z][a-z0-9+.-]*:/i.test(href)) {
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+    } else if (!href.startsWith("#")) {
+      const target = state.material.find((m) => m.path === resolvePath(path, href.split("#")[0]));
+      if (target) a.setAttribute("href", `#material/${target.path}`);
+      else a.removeAttribute("href");
+    }
+  }
+  if (scroll !== null) window.scrollTo(0, scroll);
 }
 
 async function showMaterial(path) {
@@ -1268,23 +1606,113 @@ async function showMaterial(path) {
   doc.innerHTML = '<p class="leer">Wird geladen …</p>';
   try {
     const text = await quelle.materialText(path);
-    doc.innerHTML = `<div class="md"><span class="kap-ort">Material · ${escapeHtml(item?.group ?? "")} · nur lesen</span>${marked.parse(text, { gfm: true })}</div>`;
-    for (const a of $$("a[href]", doc)) {
-      const href = a.getAttribute("href");
-      if (/^[a-z][a-z0-9+.-]*:/i.test(href)) {
-        a.target = "_blank";
-        a.rel = "noopener noreferrer";
-      } else if (!href.startsWith("#")) {
-        const target = state.material.find((m) => m.path === resolvePath(path, href.split("#")[0]));
-        if (target) a.setAttribute("href", `#material/${target.path}`);
-        else a.removeAttribute("href");
-      }
-    }
+    if (state.view?.path !== path) return;
+    state.materialText = text;
+    zeigeMaterial(path);
   } catch (err) {
     doc.innerHTML = `<p class="leer">Die Datei ließ sich nicht laden (${escapeHtml(err.message)}).</p>`;
   }
   window.scrollTo(0, 0);
 }
+
+/** Wo im Markdown ungefähr geklickt wurde: hinter dem Text, der vor der Klickstelle steht. */
+function klickStelle(blk, event, quelltext) {
+  let davor = "";
+  try {
+    const punkt = document.caretPositionFromPoint?.(event.clientX, event.clientY);
+    const range = document.createRange();
+    range.selectNodeContents(blk);
+    if (punkt) range.setEnd(punkt.offsetNode, punkt.offset);
+    else {
+      const r = document.caretRangeFromPoint?.(event.clientX, event.clientY);
+      if (!r) return quelltext.length;
+      range.setEnd(r.startContainer, r.startOffset);
+    }
+    davor = range.toString();
+  } catch {
+    return quelltext.length;
+  }
+  for (const laenge of [24, 14, 8, 4]) {
+    const probe = davor.slice(-laenge);
+    if (probe.length < Math.min(laenge, davor.length) || !probe.trim()) continue;
+    const at = quelltext.indexOf(probe);
+    if (at >= 0) return at + probe.length;
+  }
+  return davor.trim() ? quelltext.length : 0;
+}
+
+function materialBearbeiten(blk, event) {
+  const s = Number(blk.dataset.s);
+  const e = Number(blk.dataset.e);
+  const quelltext = state.materialText.slice(s, e);
+  const ziel = klickStelle(blk, event, quelltext);
+  blk._gesetzt = blk.innerHTML;
+  blk.classList.add("bearbeiten");
+  blk.innerHTML = `<div class="text ed md-quelle" contenteditable="true" spellcheck="true">${escapeHtml(quelltext)}${quelltext.endsWith("\n") ? '<br data-ende="">' : ""}</div>`;
+  const ed = blk.firstElementChild;
+  ed._material = { id: uid(), datei: state.view.path, start: s, vorher: quelltext };
+  ed.focus();
+  const { stellen } = textStellen(ed);
+  const found = knotenBei(stellen, ziel);
+  if (found) {
+    const range = document.createRange();
+    range.setStart(found[0], Math.max(0, Math.min(ziel - found[1], found[0].length)));
+    range.collapse(true);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+}
+
+async function materialFertig(ed) {
+  const sitzung = ed._material;
+  if (!sitzung) return;
+  delete ed._material;
+  const blk = ed.closest(".md-blk");
+  const jetzt = domLesen(ed, { formate: false });
+  const path = sitzung.datei;
+  const hier = () => state.view?.mode === "material" && state.view.path === path;
+  // Neu gesetzt wird erst, wenn kein anderer Block mehr offen ist (sonst ginge dort Getipptes verloren)
+  const andereOffen = () => $$(".md-blk.bearbeiten", doc).some((b) => b !== blk);
+  if (jetzt === sitzung.vorher) {
+    if (blk && blk._gesetzt !== undefined && !state.materialNeu) {
+      blk.innerHTML = blk._gesetzt; // unverändert: nur diesen Block wieder setzen
+      blk.classList.remove("bearbeiten", "konflikt");
+    } else if (hier() && !andereOffen()) {
+      state.materialNeu = false;
+      zeigeMaterial(path, { scroll: window.scrollY });
+    }
+    return;
+  }
+  blk?.classList.add("speichert");
+  try {
+    const result = await quelle.materialAendern({ datei: path, start: sitzung.start, vorher: sitzung.vorher, nachher: jetzt, sitzung: sitzung.id });
+    if (result.git) updateGit(result.git);
+    if (result.status === "konflikt" || result.status === "fehler") {
+      blk?.classList.remove("speichert");
+      blk?.classList.add("konflikt");
+      toast(result.status === "konflikt" ? "Dieser Abschnitt wurde inzwischen anderswo geändert" : "Speichern ist fehlgeschlagen",
+        `${result.meldung || ""} Dein Text steht noch da – kopiere ihn, bevor du die Seite neu lädst.`, 12000);
+      return;
+    }
+    if (hier()) {
+      state.materialText = result.text;
+      blk?.classList.remove("speichert");
+      if (andereOffen()) state.materialNeu = true;
+      else {
+        state.materialNeu = false;
+        zeigeMaterial(path, { scroll: window.scrollY });
+      }
+    }
+    loadMaterial(); // die Überschrift kann sich geändert haben (Inhaltsverzeichnis)
+  } catch (err) {
+    blk?.classList.remove("speichert");
+    blk?.classList.add("konflikt");
+    toast("Speichern ist fehlgeschlagen", `${err.message} – dein Text steht noch da.`, 10000);
+  }
+}
+
+// ------------------------------------------------------------------ Zettel außerhalb der Anordnung
 
 async function showZettel(id, { restore = null } = {}) {
   if (state.entriesById.has(String(id))) {
@@ -1303,10 +1731,11 @@ async function showZettel(id, { restore = null } = {}) {
     updatePlace(null, shownTitle(entry));
     markCurrent(null);
     hitCounter = 0;
-    doc.innerHTML = `<div class="kapitel" data-zettel="${escapeHtml(entry.id)}">${chapterHtml(entry, { level: 1, tools: true })}</div>`;
+    doc.innerHTML = `<div class="kapitel" data-zettel="${escapeHtml(entry.id)}">${chapterHtml(entry, 1)}</div>`;
     loadOpenMisc();
     if (state.term && hitCounter && restore === null) scrollToHit(state.hitIndex);
     else window.scrollTo(0, restore ?? 0);
+    nummernAlle();
   } catch (err) {
     doc.innerHTML = `<p class="leer">${escapeHtml(err.message)}</p>`;
   }
@@ -1357,7 +1786,8 @@ function updateGit(git) {
     button.title = `${git.github ? "Alle Änderungen von hier sind auf GitHub." : "Alles ist auf GitHub gesichert."}${last}`;
   } else {
     const files = git.changes.slice(0, 12).map((c) => `• ${c.path}`).join("\n");
-    button.title = `Noch nicht auf GitHub:\n${files}${git.changeCount > 12 ? `\n… und ${git.changeCount - 12} weitere` : ""}${git.ahead ? `\n${git.ahead} Sicherung(en) noch nicht hochgeladen` : ""}${last}`;
+    const auto = git.github ? "" : `\n\n${git.auto || "Wird automatisch hochgeladen, wenn du den Reader schließt, sonst spätestens nach zwei Stunden."} Ein Klick lädt sofort hoch.`;
+    button.title = `Noch nicht auf GitHub:\n${files}${git.changeCount > 12 ? `\n… und ${git.changeCount - 12} weitere` : ""}${git.ahead ? `\n${git.ahead} Sicherung(en) noch nicht hochgeladen` : ""}${last}${auto}`;
   }
 }
 
@@ -1406,7 +1836,7 @@ async function poll() {
     state.lastError = status.error;
     const stand = status.stand || status.version;
     if (stand && state.book && stand !== state.version) {
-      if (document.activeElement?.closest?.(".ed") || state.saving) state.reloadWanted = true;
+      if (document.activeElement?.closest?.("#doc .ed") || state.saving) state.reloadWanted = true;
       else await reloadBook(false, status);
     }
   } catch (err) {
@@ -1439,6 +1869,69 @@ document.addEventListener("visibilitychange", () => {
   else schedulePoll();
 });
 
+// ------------------------------------------------------------------ Export: der ganze Stand als Datei
+
+function exportOeffnen() {
+  const lokal = quelle.modus === "lokal";
+  openInsp("Export", "", `<p>Lädt den ganzen Stand als eine Datei herunter: alle Kapitel der Anordnung mit Titel, Text und Sonstigen Vermerken, das Material und alle Änderungen, die noch nicht in der zkn3 stehen. Die Datei lässt sich ohne Internet in jedem Browser lesen.</p>`
+    + '<p><button class="btn primary" type="button" data-export="laden">Herunterladen</button></p>'
+    + (lokal
+      ? '<h4>Datei vom Chromebook einlesen</h4><p class="hint">Bringt Änderungen, die unterwegs ohne Internet entstanden sind, in die zkn3 – genau wie beim Abholen über GitHub (mit Sicherungskopie und Änderungsbuch). Was schon da ist, wird übersprungen.</p>'
+        + '<p><label class="btn">Datei wählen …<input type="file" accept=".html,.htm,.json" data-export="einlesen" hidden></label></p>'
+      : '<p class="hint">Ohne Internet bleiben deine Änderungen auf diesem Gerät und gehen später von selbst auf GitHub. Die Datei ist die Sicherheit für den Notfall – der Reader auf dem Laptop kann sie unter „Export“ einlesen.</p>'), "export");
+}
+
+function herunterladen(text, name) {
+  const url = URL.createObjectURL(new Blob([text], { type: "text/html;charset=utf-8" }));
+  const a = Object.assign(document.createElement("a"), { href: url, download: name });
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
+async function exportieren(button) {
+  button.disabled = true;
+  button.textContent = "Wird zusammengestellt …";
+  try {
+    const daten = await quelle.exportDaten();
+    const html = exportHtml({ titel: state.title, ...daten }, { markdown: (t) => marked.parse(t, { gfm: true }) });
+    const name = exportName(state.title);
+    herunterladen(html, name);
+    toast("Export heruntergeladen", `${name} – ${formatNumber(daten.kapitel.length)} Kapitel, ${daten.aenderungen.length} offene Änderungen`, 6000);
+  } catch (err) {
+    toast("Export ging nicht", err.message, 9000);
+  } finally {
+    button.disabled = false;
+    button.textContent = "Herunterladen";
+  }
+}
+
+async function einlesen(input) {
+  const file = input.files?.[0];
+  if (!file) return;
+  try {
+    const daten = leseExport(await file.text());
+    const result = await quelle.einlesen(daten.aenderungen);
+    toast(result.neu ? `${result.neu === 1 ? "Eine Änderung" : `${result.neu} Änderungen`} übernommen` : "Nichts Neues in der Datei",
+      result.meldung || "", 8000);
+    if (result.bearbeitung) updateEditStatus(result.bearbeitung);
+    await reloadBook(true);
+  } catch (err) {
+    toast("Einlesen ging nicht", err.message, 9000);
+  } finally {
+    input.value = "";
+  }
+}
+
+insp.addEventListener("click", (event) => {
+  const button = event.target.closest('[data-export="laden"]');
+  if (button) exportieren(button);
+});
+insp.addEventListener("change", (event) => {
+  if (event.target.matches?.('[data-export="einlesen"]')) einlesen(event.target);
+});
+
 // ------------------------------------------------------------------ Unterwegs: Zugang einrichten, Stand auf GitHub
 
 function zeigeEinrichtung(meldung = "", { auswahl = [], frageRepo = false, schluessel = "" } = {}) {
@@ -1453,7 +1946,7 @@ function zeigeEinrichtung(meldung = "", { auswahl = [], frageRepo = false, schlu
     : frageRepo ? '<label>Repository <input type="text" id="repo" placeholder="name/repository" autocomplete="off" spellcheck="false"></label>' : "";
   doc.innerHTML = `<div class="einrichten">
     <h2>Den Roman hier öffnen</h2>
-    <p>Der Reader lädt den Roman aus deinem privaten GitHub-Repository – so, wie du ihn zuletzt auf dem Laptop mit „Sichern“ hochgeladen hast. Was du hier schreibst, kommt in die zkn3, sobald der Reader auf dem Laptop läuft.</p>
+    <p>Der Reader lädt den Roman aus deinem privaten GitHub-Repository – so, wie du ihn zuletzt auf dem Laptop gesichert hast. Was du hier schreibst, kommt in die zkn3, sobald der Reader auf dem Laptop läuft.</p>
     <p>Dafür braucht er einmal einen Zugangsschlüssel:</p>
     <ol>
       <li><a href="${escapeHtml(quelle.schluesselLink)}" target="_blank" rel="noopener noreferrer">Schlüssel bei GitHub anlegen</a> (Name, Laufzeit und Berechtigung sind schon ausgefüllt). Unter <b>Repository access</b> wählst du <b>Only select repositories</b> und dort dein Roman-Repository, dann ganz unten <b>Generate token</b>.</li>
@@ -1493,7 +1986,7 @@ async function openGithubInfo() {
         + '<p><button class="tb" data-github="hochladen">Jetzt hochladen</button></p>');
     }
     if (o.konflikte.length) {
-      parts.push(`<h4>Konflikte</h4><p class="hint">Der Absatz wurde auf dem Laptop geändert, deshalb kommt deine Fassung nicht in die zkn3. Kopiere sie bei Bedarf; den Eintrag verwirfst du im Reader auf dem Laptop.</p><ul class="aend-liste">${o.konflikte.map((c) => changeItem(c, [])).join("")}</ul>`);
+      parts.push(`<h4>Konflikte</h4><p class="hint">Die Stelle wurde auf dem Laptop geändert, deshalb kommt deine Fassung nicht in die zkn3. Kopiere sie bei Bedarf; den Eintrag verwirfst du im Reader auf dem Laptop.</p><ul class="aend-liste">${o.konflikte.map((c) => changeItem(c, [])).join("")}</ul>`);
     }
     if (o.offen.length) {
       parts.push(`<h4>Auf GitHub, noch nicht in der zkn3</h4><p class="hint">Sie kommen hinein, sobald der Reader auf dem Laptop läuft. Bis dahin zeigt der Reader hier sie schon an.</p><ul class="aend-liste">${o.offen.map((c) => changeItem(c, [])).join("")}</ul>`);
@@ -1527,6 +2020,7 @@ insp.addEventListener("click", async (event) => {
 // ------------------------------------------------------------------ Bedienelemente
 
 function wireUi() {
+  baueLeiste();
   $("#views").addEventListener("click", (event) => {
     const button = event.target.closest("button");
     if (!button) return;
@@ -1541,12 +2035,17 @@ function wireUi() {
     if (box.dataset.t === "szenen") {
       state.wholeKey = null;
       refreshView();
+    } else if (box.dataset.t === "nummern") {
+      nummernSicht.disconnect();
+      sichtbar.clear();
+      nummernAlle();
     }
   });
   $("#inhalt-knopf").addEventListener("click", () => setTocOpen(!tocOpen()));
   $("#vor").addEventListener("click", () => navigate(-1));
   $("#weiter").addEventListener("click", () => navigate(1));
   $("#btn-sichern").addEventListener("click", sichern);
+  $("#btn-export").addEventListener("click", exportOeffnen);
 
   document.addEventListener("keydown", (event) => {
     if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
@@ -1558,10 +2057,14 @@ function wireUi() {
     else if (event.key === "/") { event.preventDefault(); searchInput.focus(); searchInput.select(); }
   });
   window.addEventListener("hashchange", () => route());
+  let resizeTimer = null;
   window.addEventListener("resize", () => {
     hdrHeight();
     if (settings.inhaltOffen === null) applySettings();
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(nummernSichtbare, 250);
   });
+  document.fonts?.ready?.then(() => nummernSichtbare());
 }
 
 // ------------------------------------------------------------------ Start
