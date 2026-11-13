@@ -12,10 +12,11 @@ import {
 } from "./textsatz.js";
 import { marked } from "./vendor/marked.esm.js";
 import { LOKALER_RECHNER, waehleQuelle } from "./daten.js";
-import { titelZeile, zeilenAenderung } from "./aenderung.js";
+import { cleanNachher, titelZeile, zeilenAenderung } from "./aenderung.js";
 import { kindOf } from "./zkn3.js";
 import { FARBEN, OHNE_FARBE, domLesen, feldHtml, klartext, zerlege, zusammensetzen } from "./format.js";
 import { exportHtml, exportName, leseExport } from "./export.js";
+import { Verlauf, anwenden, schrittVon } from "./verlauf.js";
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -85,8 +86,13 @@ function wideScreen() {
   return window.innerWidth >= 1100;
 }
 
+// Handy (schmaler Bildschirm): eine Zeile oben, der Rest im Menü „⋯“, die Schreibleiste unten
+const handyAnsicht = window.matchMedia("(max-width: 640px)");
+const istHandy = () => handyAnsicht.matches;
+let tocSchmalOffen = false; // in schmalen Fenstern liegt das Inhaltsverzeichnis über dem Text: anfangs zu
+
 function tocOpen() {
-  return settings.inhaltOffen ?? wideScreen();
+  return wideScreen() ? (settings.inhaltOffen ?? true) : tocSchmalOffen;
 }
 
 function applySettings() {
@@ -100,8 +106,12 @@ function applySettings() {
 }
 
 function setTocOpen(open) {
-  settings.inhaltOffen = open;
-  saveSettings();
+  if (wideScreen()) {
+    settings.inhaltOffen = open;
+    saveSettings();
+  } else {
+    tocSchmalOffen = open;
+  }
   applySettings();
   if (open) markCurrent(state.view?.id);
   setTimeout(nummernSichtbare, 250); // die Breite des Blatts ändert sich
@@ -127,8 +137,8 @@ const state = {
   chapters: [],
   currentWhole: null,
   openMisc: new Set(), // Zettel, deren Sonstige Vermerke aufgeklappt sind
-  edited: new Map(), // `${zettel}\0${feld}` -> { erst: Text vor der ersten Bearbeitung, jetzt: zuletzt gespeichert }
   saving: 0,
+  sichernLaeuft: false,
   reloadWanted: false,
   lastError: null,
   title: "Roman",
@@ -321,7 +331,9 @@ function currentEntryId() {
 }
 
 function updatePlace(entry, title) {
-  $("#ort").textContent = entry ? `${sectionName(entry)} · ${entry.title}` : title || "";
+  // auf dem Handy steht nur der Titel da (der Abschnitt davor kostet dort zu viel Platz)
+  if (entry) $("#ort").innerHTML = `<span class="ort-abschnitt">${escapeHtml(sectionName(entry))} · </span>${escapeHtml(entry.title)}`;
+  else $("#ort").textContent = title || "";
   document.title = `${entry ? entry.title : title || "Reader"} · ${state.title}`;
   hdrHeight();
 }
@@ -352,22 +364,18 @@ function desktopNote(entry) {
 const COPY_ICON = '<svg class="symbol" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">'
   + '<rect x="1.5" y="1.5" width="9" height="9" rx="1.6"/><rect x="5.5" y="5.5" width="9" height="9" rx="1.6"/></svg>';
 
-function istBearbeitet(entry, feld) {
-  const info = state.edited.get(fkey(entry.id, feld));
-  return Boolean(info) && info.jetzt === fieldText(entry, feld);
-}
-
-function toolbarHtml(feld, edited) {
-  return `<div class="blk-tools"><span class="tag">${FELD_NAMEN[feld]}<span class="zustand">${edited ? " · bearbeitet" : ""}</span></span>`
+// Über einem Feld steht nur dann etwas, wenn es ein Problem gibt (Konflikt, nicht gespeichert,
+// Programm offen). Wie es um das Hochladen steht, zeigt der Knopf oben rechts.
+function toolbarHtml(feld) {
+  return `<div class="blk-tools"><span class="tag">${FELD_NAMEN[feld]}<span class="zustand"></span></span>`
     + `<button type="button" class="tb" data-act="durchsetzen" hidden>Meine Fassung speichern</button>`
-    + `<button type="button" class="tb" data-act="verwerfen"${edited ? "" : " hidden"}>Bearbeitung verwerfen</button></div>`;
+    + `<button type="button" class="tb" data-act="verwerfen" hidden>Meine Fassung verwerfen</button></div>`;
 }
 
 function titleHtml(entry, tag) {
-  const edited = istBearbeitet(entry, "title");
   const titel = sitzungText(entry, "title") ?? entry.title;
   return `<div class="titelzeile"><div class="blk titel" data-feld="title">`
-    + `${toolbarHtml("title", edited)}<${tag} class="text ed" contenteditable="true" spellcheck="true" data-leer="${LEER_HINWEIS.title}">${escapeHtml(titel)}</${tag}></div>`
+    + `${toolbarHtml("title")}<${tag} class="text ed" contenteditable="true" spellcheck="true" data-leer="${LEER_HINWEIS.title}">${escapeHtml(titel)}</${tag}></div>`
     + `<button type="button" class="kopieren" data-act="kopieren" title="Überschrift und Text kopieren (ohne Vermerke)" aria-label="Überschrift und Text kopieren">${COPY_ICON}</button></div>`;
 }
 
@@ -384,7 +392,7 @@ function feldInnen(entry, feld, startIndex = 0) {
 function feldBlockHtml(entry, feld) {
   const { html, hits } = feldInnen(entry, feld, feld === "content" ? hitCounter : 0);
   if (feld === "content") hitCounter += hits;
-  return `<div class="blk feld" data-feld="${feld}">${toolbarHtml(feld, istBearbeitet(entry, feld))}`
+  return `<div class="blk feld" data-feld="${feld}">${toolbarHtml(feld)}`
     + (feld === "content" ? '<div class="nummern" aria-hidden="true"></div>' : "")
     + `<div class="text ed" contenteditable="true" spellcheck="true" data-leer="${LEER_HINWEIS[feld]}">${html}</div></div>`;
 }
@@ -817,36 +825,24 @@ function insertText(text) {
   }
 }
 
+/** Zustand eines Feldes: sichtbar nur, wenn etwas nicht stimmt (sonst zeigt der Knopf oben, wie es steht). */
 function setBlockState(block, status, detail = "") {
   if (!block) return;
-  block.classList.toggle("wartet", status === "wartet" || status === "lokal");
+  block.dataset.zustand = status || "";
+  block.classList.toggle("wartet", status === "wartet");
   block.classList.toggle("konflikt", status === "konflikt" || status === "fehler" || status === "nichtGespeichert");
   const label = {
-    ungespeichert: " · wird gleich gespeichert",
-    speichert: " · speichert …",
-    offen: " · gespeichert, wird gleich eingespielt",
-    gespeichert: " · gespeichert ✓",
     wartet: " · wartet, bis das Zettelkasten-Programm geschlossen ist",
-    ...(quelle?.zustandTexte || {}),
     nichtGespeichert: ` · NOCH NICHT GESPEICHERT – ${quelle?.texte?.nichtErreichbar || "keine Verbindung"}; dein Text bleibt hier und wird von selbst gespeichert`,
     konflikt: ` · NICHT GESPEICHERT, Konflikt: ${detail} Dein Text bleibt hier.`,
     fehler: ` · nicht gespeichert: ${detail}`,
-  }[status] || (block.classList.contains("bearbeitet") ? " · bearbeitet" : "");
+  }[status] || "";
   const zustandEl = $(":scope > .blk-tools .zustand", block);
   if (zustandEl) zustandEl.textContent = label;
   const durchsetzen = $(':scope > .blk-tools [data-act="durchsetzen"]', block);
   if (durchsetzen) durchsetzen.hidden = status !== "konflikt";
   const verwerfen = $(':scope > .blk-tools [data-act="verwerfen"]', block);
-  if (verwerfen) verwerfen.hidden = !(block.classList.contains("bearbeitet") || status === "konflikt" || status === "nichtGespeichert");
-  if (leisteEd?.closest(".blk") === block) leisteZustand();
-}
-
-function setEdited(block, edited) {
-  if (!block?.isConnected) return;
-  block.classList.toggle("bearbeitet", edited);
-  const discard = $(':scope > .blk-tools [data-act="verwerfen"]', block);
-  if (discard) discard.hidden = !edited;
-  if (leisteEd?.closest(".blk") === block) leisteZustand();
+  if (verwerfen) verwerfen.hidden = status !== "konflikt";
 }
 
 const chapterContainer = (id) => doc.querySelector(`.kapitel[data-zettel="${CSS.escape(String(id))}"]`);
@@ -888,15 +884,6 @@ function updateField(entry, feld, text) {
   if (feld === "title") updateTitle(entry, text);
   else if (feld === "misc") updateMisc(entry, text);
   else updateEntryText(entry, text);
-}
-
-/** Merkt, was vor der ersten Bearbeitung dastand (für „Bearbeitung verwerfen“). */
-function merkeBearbeitung(session, jetzt) {
-  const key = fkey(session.zettel, session.feld);
-  const erst = state.edited.get(key)?.erst ?? session.ursprung;
-  if (jetzt === erst) state.edited.delete(key);
-  else state.edited.set(key, { erst, jetzt });
-  return jetzt !== erst;
 }
 
 /** Die Änderung einer Eingabe: beim Titel der ganze Titel, sonst die geänderten Zeilen. */
@@ -990,6 +977,7 @@ function zustand(s, status, detail = "") {
   s.meldung = detail;
   if (s.ed?.isConnected) setBlockState(s.ed.closest(".blk"), status, detail);
   zeigeUngesichert();
+  zeigeStatus();
 }
 
 /** Kopfzeile: ein unübersehbarer Hinweis, solange etwas nicht gespeichert ist. */
@@ -1016,10 +1004,7 @@ function handleSaveResult(entry, block, session, result, fertig) {
   if (result.stand || result.version) state.version = result.stand || result.version;
   if (result.bearbeitung) updateEditStatus(result.bearbeitung);
   if (result.git) updateGit(result.git); // unterwegs: „Auf GitHub ✓“, sobald die Änderung oben ist
-  if (entry && typeof result.text === "string") {
-    updateField(entry, session.feld, result.text);
-    setEdited(block, merkeBearbeitung(session, result.text));
-  }
+  if (entry && typeof result.text === "string") updateField(entry, session.feld, result.text);
   // Ein fertiger Titel steht so da, wie er gespeichert ist (eine Zeile, ohne Leerraum am Rand)
   const ed = block?.isConnected ? $(":scope > .ed", block) : null;
   if (entry && session.feld === "title" && fertig && !session.aktiv && ed && document.activeElement !== ed && ed.textContent !== entry.title) {
@@ -1287,7 +1272,6 @@ function feldNeuSetzen(ed) {
     }
     if (feld === "content") nummernBald(block);
   }
-  setEdited(block, istBearbeitet(entry, feld));
 }
 
 function nachEingabe(ed) {
@@ -1336,7 +1320,21 @@ doc.addEventListener("focusin", (event) => {
 // Steht die Schreibmarke in einem Text, gehört die Schreibleiste dazu (auch wenn ein Browser kein focusin meldet)
 document.addEventListener("selectionchange", () => {
   const ed = document.activeElement?.closest?.("#doc .ed");
-  if (ed && !ed.closest(".md-blk") && leisteEd !== ed && feldVonEd(ed) !== "title") zeigeLeiste(ed);
+  if (ed && !ed.closest(".md-blk") && leisteEd !== ed && (feldVonEd(ed) !== "title" || istHandy())) zeigeLeiste(ed);
+  if (ed) markeSichtbar();
+});
+
+// Vor jeder Änderung im Feld: gehört sie zum laufenden Rückgängig-Schritt? (Rückgängig aus dem
+// Menü des Browsers oder einer Geste der Bildschirmtastatur geht über denselben Verlauf.)
+doc.addEventListener("beforeinput", (event) => {
+  const ed = event.target.closest?.(".ed");
+  if (!ed || ed.closest(".md-blk")) return;
+  if (event.inputType === "historyUndo" || event.inputType === "historyRedo") {
+    event.preventDefault();
+    rueckgaengig(event.inputType === "historyUndo");
+    return;
+  }
+  schrittBeginnen(ed, event.inputType || "");
 });
 
 doc.addEventListener("input", (event) => {
@@ -1348,9 +1346,11 @@ doc.addEventListener("input", (event) => {
     ed._rettungTimer = setTimeout(() => materialMerken(ed), 400);
     return;
   }
-  if (leisteEd !== ed && feldVonEd(ed) !== "title") zeigeLeiste(ed);
+  if (leisteEd !== ed && (feldVonEd(ed) !== "title" || istHandy())) zeigeLeiste(ed);
+  if (offenerSchritt?.ed === ed) offenerSchritt.letzte = Date.now();
   eingabe(ed);
   if (feldVonEd(ed) === "content") nummernBald(ed.closest(".blk"));
+  markeSichtbar();
 });
 
 doc.addEventListener("focusout", (event) => {
@@ -1360,6 +1360,7 @@ doc.addEventListener("focusout", (event) => {
     materialFertig(ed);
     return;
   }
+  if (offenerSchritt?.ed === ed) schrittAbschliessen();
   const s = ed._sitzung;
   if (s) {
     clearTimeout(s.eingabeTimer);
@@ -1377,10 +1378,19 @@ doc.addEventListener("keydown", (event) => {
   const ed = event.target.closest?.(".ed");
   if (!ed) return;
   const material = Boolean(ed.closest(".md-blk"));
+  const taste = (event.key || "").toLowerCase();
+  if ((event.ctrlKey || event.metaKey) && !event.altKey && !material && (taste === "z" || taste === "y")) {
+    event.preventDefault(); // Rückgängig (Strg+Z) und Wiederholen (Strg+Y, Strg+Umschalt+Z) über den eigenen Verlauf
+    rueckgaengig(taste === "z" && !event.shiftKey);
+    return;
+  }
   if (event.key === "Enter" && !event.isComposing) {
     event.preventDefault();
     if (!material && feldVonEd(ed) === "title") ed.blur(); // ein Titel ist eine Zeile: Enter beendet die Eingabe
-    else insertText(event.shiftKey ? "\n\n" : "\n"); // Enter: neue Zeile, Umschalt+Enter: neuer Absatz
+    else {
+      if (!material) schrittBeginnen(ed, "insertParagraph");
+      insertText(event.shiftKey ? "\n\n" : "\n"); // Enter: neue Zeile, Umschalt+Enter: neuer Absatz
+    }
   } else if (event.key === "Escape") {
     event.preventDefault();
     ed.blur();
@@ -1397,7 +1407,9 @@ doc.addEventListener("paste", (event) => {
   if (!ed) return;
   event.preventDefault();
   const text = (event.clipboardData?.getData("text/plain") || "").replace(/\r\n?/g, "\n");
+  schrittBeginnen(ed, "einfuegen");
   insertText(!ed.closest(".md-blk") && feldVonEd(ed) === "title" ? text.replace(/\s*\n\s*/g, " ") : text);
+  schrittBeginnen(ed, "einfuegen"); // was danach getippt wird, ist ein neuer Schritt
 });
 
 doc.addEventListener("drop", (event) => {
@@ -1405,6 +1417,7 @@ doc.addEventListener("drop", (event) => {
 });
 
 window.addEventListener("pagehide", () => {
+  schrittAbschliessen(); // der laufende Rückgängig-Schritt bleibt gemerkt
   // Erst die Rettungskopien (die bleiben, bis beim nächsten Öffnen feststeht, dass alles gespeichert ist) …
   const bodies = [];
   for (const s of sitzungen.values()) {
@@ -1427,40 +1440,6 @@ window.addEventListener("pagehide", () => {
   }
   quelle?.fensterZu?.();
 });
-
-async function discardEdit(entry, block) {
-  const feld = block.dataset.feld || "content";
-  const key = fkey(entry.id, feld);
-  const info = state.edited.get(key);
-  if (!info) return;
-  const change = feld === "title" ? { start: 0, vorher: fieldText(entry, feld), nachher: info.erst }
-    : zeilenAenderung(info.jetzt, info.jetzt, info.erst);
-  const ed = $(":scope > .ed", block);
-  if (!change || !ed) {
-    state.edited.delete(key);
-    if (ed) feldNeuSetzen(ed);
-    return;
-  }
-  try {
-    const result = await quelle.aendern({ zettel: entry.id, feld, start: change.start, vorher: change.vorher,
-      nachher: change.nachher, sitzung: uid(), fertig: true });
-    if (result.status === "konflikt" || result.status === "fehler") {
-      toast("Verwerfen ging nicht", result.meldung || "", 9000);
-      return;
-    }
-    if (result.stand || result.version) state.version = result.stand || result.version;
-    if (result.bearbeitung) updateEditStatus(result.bearbeitung);
-    if (result.git) updateGit(result.git);
-    state.edited.delete(key);
-    if (typeof result.text === "string") updateField(entry, feld, result.text);
-    feldNeuSetzen(ed);
-    setBlockState(block, null);
-    toast("Bearbeitung verworfen", { title: "Der Titel steht wieder wie vorher.", misc: "Die Vermerke stehen wieder wie vorher." }[feld]
-      || "Der Text steht wieder wie vorher.");
-  } catch (err) {
-    toast("Verwerfen ging nicht", err.message, 9000);
-  }
-}
 
 /** Was „Kopieren“ in die Zwischenablage legt: Überschrift und Text (ohne Formatcodes, Vermerke und Angaben). */
 function copyText(container) {
@@ -1516,14 +1495,9 @@ doc.addEventListener("click", (event) => {
   }
   const button = event.target.closest('[data-act="verwerfen"]');
   if (button) {
-    const block = button.closest(".blk");
-    const s = $(":scope > .ed", block)?._sitzung;
-    if (s && (s.zustand === "konflikt" || s.zustand === "nichtGespeichert")) {
-      verwirfSitzung(s);
-      return;
-    }
-    const entry = containerEntry(button);
-    if (entry) discardEdit(entry, block);
+    // nur bei einem Konflikt da: deinen Text bewusst aufgeben (sonst gibt es „Rückgängig“)
+    const s = $(":scope > .ed", button.closest(".blk"))?._sitzung;
+    if (s) verwirfSitzung(s);
     return;
   }
   const durch = event.target.closest('[data-act="durchsetzen"]');
@@ -1538,43 +1512,67 @@ doc.addEventListener("click", (event) => {
   }
 });
 
-// ------------------------------------------------------------------ Schreibleiste: fett, kursiv, Farbe …
-// Erscheint oben rechts am Blatt, solange in einem Text oder in den Vermerken geschrieben wird.
+// ------------------------------------------------------------------ Schreibleiste: Rückgängig, fett, kursiv, Farbe …
+// Erscheint, solange in einem Text oder in den Vermerken geschrieben wird: am Laptop oben rechts am
+// Blatt, auf dem Handy unten über der Tastatur (dort auch beim Titel, mit „Fertig“ statt Esc).
 
 let leisteEd = null;
 
 function zeigeLeiste(ed) {
   const feld = feldVonEd(ed);
-  if (feld === "title") {
+  if (feld === "title" && !istHandy()) {
     versteckeLeiste();
     return;
   }
   leisteEd = ed;
   $(".formate", leiste).hidden = feld !== "content";
-  leisteZustand();
   leiste.hidden = false;
+  document.body.classList.add("schreibt");
+  zeigeVerlaufKnoepfe();
   leistePlatz();
 }
 
 function versteckeLeiste() {
   leiste.hidden = true;
   leisteEd = null;
+  document.body.classList.remove("schreibt");
   $(".farbwahl", leiste).hidden = true;
 }
 
 function leistePlatz() {
   if (!leiste || leiste.hidden) return;
+  if (istHandy()) {
+    // unten, genau über der Bildschirmtastatur (visualViewport: der sichtbare Teil der Seite)
+    const vv = window.visualViewport;
+    const unten = vv ? Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop)) : 0;
+    Object.assign(leiste.style, { top: "auto", right: "0px", left: "0px", bottom: `${unten}px` });
+    return;
+  }
+  Object.assign(leiste.style, { bottom: "", left: "" });
   leiste.style.top = `${Math.round(readingTop() + 8)}px`;
   const box = doc.getBoundingClientRect();
   leiste.style.right = window.innerWidth <= 760 ? "8px" : `${Math.max(8, Math.round(window.innerWidth - box.right + 10))}px`;
 }
 
-function leisteZustand() {
-  const block = leisteEd?.closest(".blk");
-  if (!block) return;
-  $(".leiste-tag", leiste).textContent = $(":scope > .blk-tools .tag", block)?.textContent || "";
-  $(".leiste-tag", leiste).classList.toggle("konflikt", block.classList.contains("konflikt"));
-  $('[data-act="leiste-verwerfen"]', leiste).hidden = !block.classList.contains("bearbeitet");
+// Auf dem Handy bleibt die Schreibmarke über der Leiste (sonst schriebe man unter ihr)
+let markeQueued = false;
+function markeSichtbar() {
+  if (markeQueued || !istHandy() || leiste.hidden) return;
+  markeQueued = true;
+  requestAnimationFrame(() => {
+    markeQueued = false;
+    const selection = window.getSelection();
+    if (!selection.rangeCount || !leisteEd?.contains(selection.focusNode)) return;
+    const range = selection.getRangeAt(0).cloneRange();
+    range.collapse(false);
+    const rect = range.getClientRects()[0] || range.getBoundingClientRect();
+    if (!rect || (!rect.top && !rect.bottom)) return;
+    const vv = window.visualViewport;
+    const sichtUnten = (vv ? vv.offsetTop + vv.height : window.innerHeight) - leiste.offsetHeight - 12;
+    const sichtOben = readingTop() + 8;
+    if (rect.bottom > sichtUnten) window.scrollBy(0, rect.bottom - sichtUnten);
+    else if (rect.top < sichtOben) window.scrollBy(0, rect.top - sichtOben);
+  });
 }
 
 function planeSpeichern(ed) {
@@ -1584,8 +1582,10 @@ function planeSpeichern(ed) {
 function formatieren(befehl, wert) {
   const ed = document.activeElement?.closest?.(".ed");
   if (!ed || feldVonEd(ed) !== "content" || ed.closest(".md-blk")) return;
+  schrittBeginnen(ed, "formatieren"); // Formatieren ist ein eigener Schritt (Rückgängig)
   document.execCommand(befehl, false, wert ?? null);
   ensureEnde(ed);
+  schrittBeginnen(ed, "formatieren");
   planeSpeichern(ed); // nicht jeder Browser meldet Formatierungen als Eingabe
 }
 
@@ -1601,7 +1601,7 @@ function baueLeiste() {
     `<button type="button" class="farbe${farbe === OHNE_FARBE ? " ohne" : ""}" data-farbe="${farbe}" title="${name}" aria-label="${name}"${farbe === OHNE_FARBE ? "" : ` style="--f:${farbe}"`}></button>`).join("");
   // Die Leiste nimmt der Eingabe nie die Schreibmarke (sonst ginge die Auswahl verloren)
   leiste.addEventListener("mousedown", (event) => event.preventDefault());
-  leiste.addEventListener("click", async (event) => {
+  leiste.addEventListener("click", (event) => {
     const button = event.target.closest("button");
     if (!button) return;
     if (button.dataset.fmt) formatieren(button.dataset.fmt);
@@ -1609,24 +1609,252 @@ function baueLeiste() {
     else if (button.dataset.farbe) {
       formatieren("foreColor", button.dataset.farbe);
       $(".farbwahl", leiste).hidden = true;
-    } else if (button.dataset.act === "leiste-verwerfen" && leisteEd) {
-      const ed = leisteEd;
-      const block = ed.closest(".blk");
-      const entry = containerEntry(ed);
-      const s = ed._sitzung;
-      if (s && (s.zustand === "konflikt" || s.zustand === "nichtGespeichert")) {
-        verwirfSitzung(s);
-        return;
-      }
-      ed.blur();
-      await (s?.chain || Promise.resolve());
-      if (entry && block) discardEdit(entry, block);
-    }
+    } else if (button.dataset.act === "zurueck") rueckgaengig(true);
+    else if (button.dataset.act === "wieder") rueckgaengig(false);
+    else if (button.dataset.act === "fertig") document.activeElement?.closest?.(".ed")?.blur();
   });
   try {
     document.execCommand("styleWithCSS", false, false); // fett als <b> usw., nicht als style-Angabe
   } catch {
     /* ältere Browser */
+  }
+}
+
+// ------------------------------------------------------------------ Rückgängig und Wiederholen
+// Ein eigener Verlauf statt dem des Browsers: Der vergisst alles, sobald ein Feld neu gesetzt wird
+// (nach dem Speichern, beim Blättern). Dieser gilt über Felder und Kapitel hinweg, auch für Titel,
+// Vermerke und Material, und übersteht das Neuladen der Seite (siehe verlauf.js). Ein Schritt endet
+// nach einer Sekunde Pause, bei Zeilenumbruch, Einfügen, Ausschneiden und Formatieren.
+// Rückgängig gemacht wird wie getippt: über die Sitzung des Feldes, also mit Rettungskopie und
+// Speichern wie jede Eingabe.
+
+const verlauf = new Verlauf({ laden: () => store.get("verlauf", null), speichern: (daten) => store.set("verlauf", daten) });
+// Ein Zeilenumbruch beginnt einen neuen Schritt (was danach getippt wird, gehört dazu); Einfügen,
+// Ausschneiden, Formatieren und Ersetzen (Rechtschreibvorschlag) sind je ein Schritt für sich.
+const BEGINN = new Set(["insertParagraph", "insertLineBreak"]);
+const BRUCH = new Set(["insertFromPaste", "insertFromDrop", "deleteByCut", "deleteByDrag", "insertReplacementText",
+  "insertFromYank", "formatieren", "einfuegen"]);
+let offenerSchritt = null;
+
+/** Vor einer Änderung (das Feld zeigt noch den alten Stand): gehört sie zum laufenden Schritt? */
+function schrittBeginnen(ed, typ = "") {
+  if (!ed || ed.closest(".md-blk")) return;
+  const block = ed.closest(".blk");
+  const entry = containerEntry(ed);
+  if (!entry || !block) return;
+  const feld = block.dataset.feld || "content";
+  const key = fkey(entry.id, feld);
+  const now = Date.now();
+  const loeschen = typ.startsWith("delete");
+  const o = offenerSchritt;
+  const weiter = o && o.key === key && o.ed === ed && now - o.letzte < 1000 && !o.bruch && !BRUCH.has(typ) && !BEGINN.has(typ)
+    && o.loeschen === loeschen;
+  if (!weiter) {
+    schrittAbschliessen();
+    offenerSchritt = { key, zettel: entry.id, feld, titel: entry.title, vorText: edText(ed), ed, loeschen, bruch: BRUCH.has(typ), letzte: now };
+    zeigeVerlaufKnoepfe();
+  }
+  offenerSchritt.letzte = now;
+}
+
+/** Den laufenden Schritt festhalten (vor Rückgängig, beim Verlassen des Feldes, beim nächsten Schritt). */
+function schrittAbschliessen() {
+  const o = offenerSchritt;
+  if (!o) return;
+  offenerSchritt = null;
+  const nach = o.ed?.isConnected ? edText(o.ed) : sitzungen.get(o.key)?.jetzt;
+  if (typeof nach !== "string") return;
+  const schritt = schrittVon(o.vorText, nach, { art: "feld", key: o.key, zettel: o.zettel, feld: o.feld, titel: o.titel });
+  if (schritt) {
+    verlauf.neu(schritt);
+    zeigeVerlaufKnoepfe();
+  }
+}
+
+function schrittName(schritt) {
+  if (!schritt) return "";
+  if (schritt.art === "datei") return `Material „${schritt.titel || schritt.datei}“`;
+  return `${FELD_NAMEN[schritt.feld] || "Text"} in „${schritt.titel || `Zettel ${schritt.zettel}`}“`;
+}
+
+function zeigeVerlaufKnoepfe() {
+  const zurueck = verlauf.zurueck[verlauf.zurueck.length - 1] || (offenerSchritt ? { art: "feld", ...offenerSchritt } : null);
+  const vor = offenerSchritt ? null : verlauf.vor[verlauf.vor.length - 1];
+  for (const button of $$('[data-act="zurueck"]')) {
+    button.disabled = !zurueck;
+    button.title = zurueck ? `Rückgängig: ${schrittName(zurueck)} (Strg+Z)` : "Rückgängig (Strg+Z) – noch nichts zu tun";
+  }
+  for (const button of $$('[data-act="wieder"]')) {
+    button.disabled = !vor;
+    button.title = vor ? `Wiederholen: ${schrittName(vor)} (Strg+Y)` : "Wiederholen (Strg+Y)";
+  }
+}
+
+/** Das Feld eines Zettels zeigen (Kapitel aufschlagen, Vermerke aufklappen) – liefert sein Eingabefeld. */
+async function feldZeigen(zettel, feld) {
+  let container = chapterContainer(zettel);
+  if (!container) {
+    let entry = entryById(zettel);
+    if (!entry) {
+      try {
+        await quelle.zettel(zettel);
+      } catch {
+        return null;
+      }
+      entry = entryById(zettel);
+    }
+    document.activeElement?.closest?.("#doc .ed")?.blur();
+    versteckeLeiste();
+    if (entry?.pos) {
+      history.pushState(null, "", `#kapitel/${zettel}`);
+      showChapter(zettel, { toHit: false });
+    } else {
+      history.pushState(null, "", `#zettel/${zettel}`);
+      await showZettel(zettel);
+    }
+    container = chapterContainer(zettel);
+  }
+  if (!container) return null;
+  if (feld === "misc") {
+    const details = $("details.vermerke", container);
+    if (!details) return null;
+    if (!details.open) {
+      details.open = true;
+      state.openMisc.add(String(zettel));
+    }
+    await loadMisc(details);
+    await waitFrame();
+  }
+  return container.querySelector(`.blk[data-feld="${feld}"] > .ed`);
+}
+
+const waitFrame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
+
+/** Wie viele Zeichen der Leser vor dieser Stelle sieht (Formatcodes zählen nicht). */
+function sichtbareLaenge(feld, text) {
+  return feld === "content" ? klartext(text).length : text.length;
+}
+
+/** Ein Feld auf einen neuen Wortlaut setzen – wie getippt (Sitzung, Rettungskopie, Speichern). */
+function feldSetzen(ed, text, stelle) {
+  const block = ed.closest(".blk");
+  const feld = block?.dataset.feld || "content";
+  const fokus = document.activeElement === ed;
+  const s = ed._sitzung || startSitzung(ed);
+  if (!s) return false;
+  if (feld === "title") ed.textContent = text;
+  else {
+    const { html } = feldHtml(text, { term: state.term, markClass: feld === "misc" ? "treffer-v" : "treffer", formate: feld === "content" });
+    ed.innerHTML = html + (text.endsWith("\n") ? '<br data-ende="">' : "");
+  }
+  ensureEnde(ed);
+  if (feld === "content") nummernBald(block);
+  s.jetzt = edText(ed);
+  sitzungMerken(s);
+  const von = sichtbareLaenge(feld, text.slice(0, stelle.at));
+  const bis = sichtbareLaenge(feld, text.slice(0, stelle.ende));
+  if (fokus) {
+    setzeAuswahl(ed, { start: bis, end: bis });
+    eingabe(ed);
+  } else {
+    s.aktiv = false;
+    clearTimeout(s.eingabeTimer);
+    save(s, true);
+  }
+  zeigeStelle(ed, von, bis);
+  return true;
+}
+
+/** Die geänderte Stelle ins Bild holen und kurz hervorheben. */
+function zeigeStelle(ed, von, bis) {
+  const { stellen } = textStellen(ed);
+  const punkt = (offset) => {
+    const found = knotenBei(stellen, offset);
+    return found ? [found[0], Math.max(0, Math.min(offset - found[1], found[0].length))] : [ed, ed.childNodes.length];
+  };
+  try {
+    const range = document.createRange();
+    range.setStart(...punkt(von));
+    range.setEnd(...punkt(Math.max(von, bis)));
+    const rect = range.getClientRects()[0] || range.getBoundingClientRect() || ed.getBoundingClientRect();
+    const oben = readingTop() + 12;
+    const unten = (window.visualViewport ? window.visualViewport.height : window.innerHeight) - (leiste.hidden ? 24 : leiste.offsetHeight + 24);
+    if (rect.top < oben || rect.bottom > unten) window.scrollBy(0, rect.top - oben - (unten - oben) / 3);
+    if (typeof Highlight === "function" && CSS.highlights) {
+      CSS.highlights.set("rueckgaengig", new Highlight(range));
+      clearTimeout(zeigeStelle.timer);
+      zeigeStelle.timer = setTimeout(() => CSS.highlights.delete("rueckgaengig"), 1600);
+    }
+  } catch {
+    /* nur Komfort */
+  }
+}
+
+async function feldSchritt(schritt, zurueck) {
+  const ed = await feldZeigen(schritt.zettel, schritt.feld);
+  if (!ed) return "Der Zettel ließ sich nicht öffnen.";
+  const ergebnis = anwenden(edText(ed), schritt, zurueck);
+  if (!ergebnis) return "Die Stelle wurde inzwischen anderswo geändert.";
+  return feldSetzen(ed, ergebnis.text, ergebnis) ? null : "Das Feld lässt sich gerade nicht bearbeiten.";
+}
+
+async function materialSchritt(schritt, zurueck) {
+  if (state.view?.mode !== "material" || state.view.path !== schritt.datei) {
+    history.pushState(null, "", `#material/${schritt.datei}`);
+    await showMaterial(schritt.datei);
+  }
+  const vorher = zurueck ? schritt.neu : schritt.alt;
+  const nachher = zurueck ? schritt.alt : schritt.neu;
+  const result = await quelle.materialAendern({ datei: schritt.datei, start: schritt.at, vorher, nachher, sitzung: uid() });
+  if (result.git) updateGit(result.git);
+  if (result.status === "konflikt" || result.status === "fehler") return result.meldung || "Die Stelle wurde inzwischen anderswo geändert.";
+  if (typeof result.text === "string" && state.view?.path === schritt.datei) {
+    state.materialText = result.text;
+    if (!$$(".md-blk.bearbeiten", doc).length) zeigeMaterial(schritt.datei, { scroll: window.scrollY });
+  }
+  loadMaterial();
+  return null;
+}
+
+// Mehrmals schnell hintereinander geklickt: jeder Klick ist ein Schritt, der Reihe nach
+let verlaufKette = Promise.resolve();
+
+/** Rückgängig (zurueck = true) oder Wiederholen. */
+function rueckgaengig(zurueck = true) {
+  verlaufKette = verlaufKette.then(() => verlaufSchritt(zurueck), () => verlaufSchritt(zurueck));
+  return verlaufKette;
+}
+
+async function verlaufSchritt(zurueck) {
+  try {
+    const material = document.activeElement?.closest?.(".md-blk .ed");
+    if (material) {
+      material.blur(); // ein offener Material-Block wird erst gespeichert – das ist dann der letzte Schritt
+      for (let i = 0; i < 50 && $$(".md-blk.speichert", doc).length; i += 1) await new Promise((r) => setTimeout(r, 100));
+    }
+    schrittAbschliessen();
+    const stapelVon = zurueck ? verlauf.zurueck : verlauf.vor;
+    const schritt = stapelVon.pop();
+    if (!schritt) {
+      toast(zurueck ? "Nichts zum Rückgängigmachen" : "Nichts zum Wiederholen");
+      return;
+    }
+    let problem;
+    try {
+      problem = schritt.art === "datei" ? await materialSchritt(schritt, zurueck) : await feldSchritt(schritt, zurueck);
+    } catch (err) {
+      problem = err.message;
+    }
+    if (problem) {
+      toast(zurueck ? "Ließ sich nicht rückgängig machen" : "Ließ sich nicht wiederholen", `${schrittName(schritt)}: ${problem}`, 8000);
+    } else {
+      (zurueck ? verlauf.vor : verlauf.zurueck).push(schritt);
+      // feldSetzen hat den Stand wie eine Eingabe übernommen: das ist kein neuer Schritt
+      if (offenerSchritt?.key === schritt.key) offenerSchritt = null;
+    }
+    verlauf.merken();
+  } finally {
+    zeigeVerlaufKnoepfe();
   }
 }
 
@@ -1660,6 +1888,8 @@ document.addEventListener("click", (event) => {
 searchInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();
+    menuZu(); // auf dem Handy: die Treffer erscheinen unten, das Menü geht zu
+    searchInput.blur();
     runSearch(searchInput.value);
   } else if (event.key === "Escape") {
     closeInsp();
@@ -1767,38 +1997,100 @@ function updateDesktopButton() {
     `<p class="hint">Diese Kapitel zeigt das Zettelkasten-Programm auf dem Schreibtisch in einer eigenen, eingefrorenen Fassung. Der Reader zeigt immer den Zettel.</p><ul>${list.map((e) => `<li><a href="#kapitel/${escapeHtml(e.id)}">${escapeHtml(e.title)}</a></li>`).join("")}</ul>`);
 }
 
-// Hinweise zu wartenden Änderungen, Konflikten und verlorenen Änderungen (nur wenn es welche gibt)
+// Einträge in den Listen des Speicherstands (Änderungen, Konflikte, verlorene Änderungen)
+const HERKUNFT = { Chromebook: "vom Chromebook", Handy: "vom Handy", Tablet: "vom Tablet" };
+
+function herkunftVon(change) {
+  if (!(change.unterwegs || String(change.id || "").startsWith("u-"))) return "";
+  return ` · ${HERKUNFT[change.geraet] || "von unterwegs"}`;
+}
+
+function changeWo(change) {
+  const feld = { title: " · Titel", misc: " · Sonstige Vermerke" }[change.feld] || "";
+  const wo = change.datei
+    ? `<a href="#material/${escapeHtml(change.datei)}">${escapeHtml(change.titel || change.datei)}</a>`
+    : `<a href="#kapitel/${escapeHtml(change.zettel)}">${escapeHtml(change.titel || `Zettel ${change.zettel}`)}</a>`;
+  return `${wo}${feld}`;
+}
+
 function changeItem(change, actions) {
   const when = change.eingespielt || change.geaendert || change.erstellt;
   const buttons = actions.map(([action, label]) => `<button class="tb" data-aktion="${action}" data-id="${escapeHtml(change.id)}">${label}</button>`).join("");
-  const herkunft = change.unterwegs || String(change.id || "").startsWith("u-") ? ` · ${change.geraet === "Chromebook" ? "vom Chromebook" : "von unterwegs"}` : "";
-  const feld = { title: " · Titel", misc: " · Sonstige Vermerke" }[change.feld] || "";
-  const wo = change.datei
-    ? `<a href="#material/${escapeHtml(change.datei)}">${escapeHtml(change.datei)}</a>`
-    : `<a href="#kapitel/${escapeHtml(change.zettel)}">${escapeHtml(change.titel || `Zettel ${change.zettel}`)}</a>`;
-  return `<li><div class="wo">${escapeHtml(formatDate(when))}${herkunft} · ${wo}${feld}${change.grund ? ` · ${escapeHtml(change.grund)}` : ""}</div>`
+  return `<li><div class="wo">${escapeHtml(formatDate(when))}${herkunftVon(change)} · ${changeWo(change)}${change.grund ? ` · ${escapeHtml(change.grund)}` : ""}</div>`
     + `<span class="vorher">${escapeHtml(change.vorher || "")}</span><span class="nachher">${escapeHtml(change.nachher || "(gelöscht)")}</span>${buttons}</li>`;
 }
 
-async function openProblems() {
-  if (quelle.modus === "github") {
-    openGithubInfo();
+/** Kurz: wann, woher, wo – für lange Listen (was auf den Laptop wartet). */
+function changeZeile(change) {
+  const when = change.geaendert || change.erstellt;
+  return `<li><div class="wo">${escapeHtml(kurzeZeit(when) || formatDate(when))}${herkunftVon(change)} · ${changeWo(change)}</div></li>`;
+}
+
+/**
+ * Der Speicherstand im Überblick, auf beiden Geräten gleich aufgebaut: oben ein Satz, wie es steht;
+ * darunter, was noch nicht auf GitHub ist, was auf den Laptop wartet und was nicht passt.
+ */
+async function openStatus() {
+  const github = quelle.modus === "github";
+  if (insp.hidden || insp.dataset.art !== "status") openInsp("Speicherstand", "", '<p class="hint">Wird geladen …</p>', "status");
+  let o;
+  try {
+    o = await quelle.aenderungen();
+  } catch (err) {
+    $("#insp-body").innerHTML = `<p class="st-kopf st-problem">${escapeHtml(statusArt().satz)}</p><p class="hint">${escapeHtml(err.message)}</p>`;
     return;
   }
-  openInsp("Änderungen", "", '<p class="hint">Wird geladen …</p>', "aenderungen");
-  try {
-    const o = await quelle.aenderungen();
-    const parts = [];
+  if (insp.hidden || insp.dataset.art !== "status") return;
+  const git = state.git || {};
+  const a = statusArt();
+  const n = (count, one, many) => `${count} ${count === 1 ? one : many}`;
+  const parts = [`<p class="st-kopf st-${a.art}">${escapeHtml(a.satz)}</p>`];
+  const hochladen = github ? o.hochladen.length : (git.changeCount || git.ahead);
+  if (hochladen || a.art === "unten" || a.art === "offline") {
+    parts.push(`<p><button class="btn primary" type="button" data-status="hochladen"${state.sichernLaeuft ? " disabled" : ""}>${state.sichernLaeuft ? "Lädt hoch …" : "Jetzt hochladen"}</button></p>`);
+  }
+  if (github) {
+    if (o.hochladen.length) {
+      parts.push(`<h4>Noch nicht auf GitHub (auf diesem Gerät gespeichert)</h4><ul class="aend-liste kurz">${o.hochladen.map(changeZeile).join("")}</ul>`);
+    }
+    if (o.offen.length) {
+      parts.push(`<h4>Auf GitHub – wartet auf den Laptop</h4><p class="hint">${n(o.offen.length, "Änderung von unterwegs ist", "Änderungen von unterwegs sind")} sicher auf GitHub und hier schon zu sehen. In die zkn3 (und damit ins Zettelkasten-Programm) kommen sie, sobald der Reader-Dienst auf dem Laptop läuft; wenige Minuten danach meldet der Laptop das zurück.</p>`
+        + `<ul class="aend-liste kurz">${o.offen.map(changeZeile).join("")}</ul>`);
+    }
+    if (o.konflikte.length) {
+      parts.push(`<h4>Konflikte</h4><p class="hint">Die Stelle wurde auf dem Laptop geändert, deshalb kommt diese Fassung nicht in die zkn3. Kopiere sie bei Bedarf; den Eintrag verwirfst du im Reader auf dem Laptop.</p><ul class="aend-liste">${o.konflikte.map((c) => changeItem(c, [])).join("")}</ul>`);
+    }
+    const grundlage = o.stand?.datum ? `Grundlage ist die zkn3, wie der Laptop sie ${kurzeZeit(o.stand.datum, { lang: true })} gesichert hat${o.offen.length ? ", mit den Änderungen von unterwegs darüber" : ""}.` : "";
+    const oben = o.zuletztOben ? ` Dieses Gerät (${o.geraet}) hat zuletzt ${kurzeZeit(o.zuletztOben, { lang: true })} hochgeladen.` : "";
+    if (grundlage || oben) parts.push(`<p class="hint">${escapeHtml(grundlage + oben)}</p>`);
+    if (o.ohneNetz) parts.push('<p class="hint">Ohne Verbindung geöffnet: Angezeigt wird der Stand, der zuletzt auf dieses Gerät geladen wurde.</p>');
+    parts.push('<p class="abmelden"><button class="tb" data-github="abmelden">Zugangsschlüssel auf diesem Gerät löschen</button></p>');
+  } else {
+    if (git.changeCount) {
+      const files = (git.changes || []).slice(0, 12).map((c) => `<li><div class="wo">${escapeHtml(c.path)}</div></li>`).join("");
+      parts.push(`<h4>Noch nicht auf GitHub</h4><ul class="aend-liste kurz">${files}${git.changeCount > 12 ? `<li><div class="wo">… und ${git.changeCount - 12} weitere</div></li>` : ""}</ul>`);
+    }
     if (o.fehler) parts.push(`<p class="hint">Beim letzten Einspielen: ${escapeHtml(o.fehler)}</p>`);
     if (o.verloren.length) parts.push(`<h4>Fehlen wieder in der zkn3</h4><p class="hint">Diese Änderungen waren eingespielt, stehen aber nicht mehr im Zettel – vermutlich hat das Zettelkasten-Programm einen älteren Stand gespeichert.</p><ul class="aend-liste">${o.verloren.map((c) => changeItem(c, [["erneut", "Erneut einspielen"], ["ignorieren", "Ist in Ordnung"]])).join("")}</ul>`);
-    if (o.konflikte.length) parts.push(`<h4>Konflikte</h4><p class="hint">Die Stelle wurde anderswo geändert, deshalb ist deine Fassung nicht eingespielt. Kopiere sie bei Bedarf und verwirf den Eintrag dann.</p><ul class="aend-liste">${o.konflikte.map((c) => changeItem(c, [["verwerfen", "Verwerfen"]])).join("")}</ul>`);
+    if (o.konflikte.length) parts.push(`<h4>Konflikte</h4><p class="hint">Die Stelle wurde anderswo geändert, deshalb ist diese Fassung nicht eingespielt. Kopiere sie bei Bedarf und verwirf den Eintrag dann.</p><ul class="aend-liste">${o.konflikte.map((c) => changeItem(c, [["verwerfen", "Verwerfen"]])).join("")}</ul>`);
     if (o.offen.length) parts.push(`<h4>Noch nicht in der zkn3</h4><p class="hint">${o.programm ? "Das Zettelkasten-Programm ist geöffnet – sie kommen hinein, sobald du es schließt." : "Sie werden gleich eingespielt."}</p><ul class="aend-liste">${o.offen.map((c) => changeItem(c, [])).join("")}</ul>`);
-    if (!parts.length) parts.push('<p class="hint">Alles ist eingespielt.</p>');
-    $("#insp-body").innerHTML = parts.join("");
-  } catch (err) {
-    $("#insp-body").innerHTML = `<p class="hint">${escapeHtml(err.message)}</p>`;
+    const geholt = git.unterwegsFehler ? `GitHub ist gerade nicht erreichbar (${git.unterwegsFehler}); Änderungen von unterwegs kommen, sobald es wieder geht.`
+      : git.unterwegsGeholt ? `Nach Änderungen von unterwegs (Chromebook, Handy) zuletzt ${kurzeZeit(git.unterwegsGeholt, { lang: true })} gesehen – das geschieht jede Minute.` : "";
+    if (geholt) parts.push(`<p class="hint">${escapeHtml(geholt)}</p>`);
   }
+  $("#insp-body").innerHTML = parts.join("");
 }
+
+// früherer Name (Hinweiszeile unter der Kopfleiste)
+const openProblems = openStatus;
+
+insp.addEventListener("click", (event) => {
+  const button = event.target.closest('[data-status="hochladen"]');
+  if (!button) return;
+  button.disabled = true;
+  button.textContent = "Lädt hoch …";
+  sichern();
+});
 
 insp.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-aktion]");
@@ -1991,6 +2283,12 @@ async function materialFertig(ed) {
       return;
     }
     rettung.loeschen(materialKey(sitzung));
+    if (result.status === "gespeichert" || result.status === "offen") {
+      const item = state.material.find((m) => m.path === path);
+      verlauf.neu({ art: "datei", key: `datei\u0000${path}`, datei: path, titel: item?.title || path, at: sitzung.start,
+        alt: sitzung.vorher, neu: cleanNachher("content", jetzt), vor: "", nach: "", zeit: Date.now() });
+      zeigeVerlaufKnoepfe();
+    }
     if (hier() && !ed.isConnected) {
       state.materialText = result.text; // der Block ist schon weg (anderes Kapitel): nur den Stand merken
     } else if (hier()) {
@@ -2093,85 +2391,148 @@ async function showZettel(id, { restore = null } = {}) {
 
 // ------------------------------------------------------------------ Speicherstand, Sichern, Status
 
+/** Die Zeile unter der Kopfleiste: nur wenn etwas nicht passt (Konflikt, Programm offen …). */
 function updateEditStatus(b) {
   state.edit = b;
   const el = $("#speicherstand");
   const n = (count, one, many) => `${count} ${count === 1 ? one : many}`;
   let text = "";
   let cls = "";
-  if (b.fehler) { text = `⚠ Speichern gestört: ${b.fehler}`; cls = "problem"; }
+  if (b.fehler && quelle?.modus !== "github") { text = `⚠ Speichern gestört: ${b.fehler}`; cls = "problem"; }
   else if (b.konflikte) { text = `⚠ ${n(b.konflikte, "Konflikt", "Konflikte")}`; cls = "problem"; }
   else if (b.verloren) { text = `⚠ ${n(b.verloren, "Änderung fehlt", "Änderungen fehlen")} wieder in der zkn3`; cls = "problem"; }
-  else if (b.hochladen) { text = `⏳ ${n(b.hochladen, "Änderung", "Änderungen")} noch nicht auf GitHub – keine Verbindung`; cls = "wartet"; }
   else if (b.programm && b.offen) { text = `⏳ ${n(b.offen, "Änderung wartet", "Änderungen warten")}, bis das Zettelkasten-Programm geschlossen ist`; cls = "wartet"; }
   else if (b.programm) { text = "Zettelkasten-Programm geöffnet – Änderungen warten bis zum Schließen"; cls = "wartet"; }
-  else if (b.offen) { text = `${n(b.offen, "Änderung wird", "Änderungen werden")} gleich eingespielt`; cls = "offen"; }
   el.className = `speicherstand ${cls}`;
   el.innerHTML = text ? `<a href="#" data-oeffnet="1" id="zu-aenderungen">${escapeHtml(text)}</a>` : "";
   el.parentElement.hidden = !text && $("#ungesichert").hidden; // die Zeile erscheint nur, wenn es etwas zu melden gibt
   hdrHeight();
+  zeigeStatus();
 }
 
 $("#speicherstand").addEventListener("click", (event) => {
   if (event.target.id !== "zu-aenderungen") return;
   event.preventDefault();
-  openProblems();
+  openStatus();
 });
 
-// Der Knopf zeigt auf beiden Geräten, ob alles auf GitHub ist: „Auf GitHub ✓“ (ruhig) oder
-// „Noch nicht auf GitHub“ (auffällig) – ein Klick darauf lädt dann sofort hoch.
-const KNOPF = { oben: "Auf GitHub ✓", unten: "Noch nicht auf GitHub", laedt: "Lädt hoch …" };
+const pad2 = (n) => String(n).padStart(2, "0");
 
-function knopfZeigen(button, art) {
-  button.textContent = KNOPF[art];
-  button.classList.remove("primary");
-  button.classList.toggle("oben", art === "oben");
-  button.classList.toggle("unten", art !== "oben");
+/** Kurze Zeitangabe für den Knopf: „9:48“, „gestern 23:12“, „12.11. 23:12“. */
+function kurzeZeit(iso, { lang = false } = {}) {
+  const d = iso ? new Date(iso) : null;
+  if (!d || Number.isNaN(d.getTime())) return "";
+  const hm = `${d.getHours()}:${pad2(d.getMinutes())}`;
+  const tag = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const tage = Math.round((tag(new Date()) - tag(d)) / 86400000);
+  if (tage === 0) return lang ? `heute um ${hm}` : hm;
+  if (tage === 1) return lang ? `gestern um ${hm}` : `gestern ${hm}`;
+  return lang ? `am ${d.getDate()}.${d.getMonth() + 1}.${d.getFullYear() === new Date().getFullYear() ? "" : d.getFullYear()} um ${hm}`
+    : `${d.getDate()}.${d.getMonth() + 1}. ${hm}`;
+}
+
+/**
+ * Wie es um das Speichern steht – EIN Zustand für den Knopf oben, auf beiden Geräten:
+ *   oben     alles (auch das eben Getippte) ist auf GitHub          „Auf GitHub ✓ 9:48“
+ *   unten    etwas ist noch nicht oben (geht gleich von selbst hoch) „Noch nicht auf GitHub“
+ *   laedt    wird gerade hochgeladen                                 „Lädt hoch …“
+ *   offline  keine Verbindung: alles bleibt auf dem Gerät             „Offline“
+ *   problem  etwas ist nicht gespeichert oder gestört                „Nicht gespeichert“ …
+ */
+function statusArt() {
+  const git = state.git;
+  const github = quelle?.modus === "github";
+  const sitz = [...sitzungen.values()];
+  const nichtGespeichert = sitz.filter((s) => s.zustand === "nichtGespeichert").length + $$(".md-blk.nicht-gespeichert", doc).length;
+  const konflikte = sitz.filter((s) => s.zustand === "konflikt").length;
+  const tippt = sitz.some((s) => s.zustand === "ungespeichert" || s.zustand === "speichert") || $$(".md-blk.speichert", doc).length > 0;
+  const n = (count, one, many) => `${count} ${count === 1 ? one : many}`;
+  if (!github && !state.online) {
+    return { art: "problem", text: "Dienst antwortet nicht",
+      satz: "Der Reader-Dienst auf dem Laptop antwortet nicht. Was du tippst, bleibt im Feld und wird gespeichert, sobald er wieder läuft (Doppelklick auf „Roman“)." };
+  }
+  if (nichtGespeichert) {
+    return { art: "problem", text: "Nicht gespeichert",
+      satz: `${n(nichtGespeichert, "Ein Text ist", "Texte sind")} noch nicht gespeichert – ${quelle?.texte?.nichtErreichbar || "keine Verbindung"}. Dein Text bleibt im Feld und wird von selbst gespeichert.` };
+  }
+  if (!git) return { art: "unbekannt", text: github ? "GitHub …" : "Sichern", satz: "Wird geprüft …" };
+  const offen = (git.changeCount || 0) + (git.ahead || 0);
+  const wartend = offen || tippt;
+  if (github && git.offline) {
+    return { art: "offline", text: wartend ? "Offline · auf dem Gerät" : "Offline", zeit: wartend ? null : git.standOben,
+      satz: `Keine Verbindung zu GitHub. Du kannst weiterschreiben: ${wartend ? "Deine Änderungen sind auf diesem Gerät gespeichert und gehen" : "Was du schreibst, bleibt auf diesem Gerät und geht"} von selbst hoch, sobald wieder Verbindung besteht.` };
+  }
+  if (git.ok === false) {
+    return { art: "problem", text: github ? "GitHub-Zugang" : "Git-Problem", satz: git.error || "Git meldet ein Problem." };
+  }
+  if (state.sichernLaeuft || git.laeuft) return { art: "laedt", text: "Lädt hoch …", satz: "Wird gerade zu GitHub hochgeladen …" };
+  if (github && git.fehler) return { art: "problem", text: "Hochladen gestört", satz: `${git.fehler} Deine Änderungen sind auf diesem Gerät gespeichert.` };
+  if (konflikte) return { art: "problem", text: "Konflikt", satz: "Eine Stelle wurde inzwischen anderswo geändert – bitte im Feld entscheiden." };
+  if (wartend) {
+    const satz = github
+      ? `${offen ? n(offen, "Änderung ist", "Änderungen sind") : "Was du eben getippt hast, ist"} noch nicht auf GitHub (auf diesem Gerät gespeichert). Das geht in wenigen Sekunden von selbst.`
+      : git.ahead && !git.changeCount
+        ? "Auf dem Laptop gesichert, aber noch nicht hochgeladen (keine Verbindung?). Wird von selbst wiederholt."
+        : `Auf dem Laptop gespeichert, aber noch nicht auf GitHub. ${git.auto || "Lädt von selbst hoch, kurz nachdem du etwas geändert hast."}`;
+    return { art: "unten", text: "Noch nicht auf GitHub", satz };
+  }
+  const zeit = github ? git.standOben : git.zuletztOben || git.lastCommit?.time;
+  return { art: "oben", text: "Auf GitHub ✓", zeit,
+    satz: `Alles ist auf GitHub${zeit ? ` – Stand ${kurzeZeit(zeit, { lang: true })}` : ""}.` };
+}
+
+/** Knopf oben rechts: zeigt den Stand, ein Klick zeigt Einzelheiten (und lädt hoch, wenn etwas fehlt). */
+function zeigeStatus() {
+  const button = $("#btn-sichern");
+  if (!button || !quelle) return;
+  const a = statusArt();
+  const zeit = a.zeit ? kurzeZeit(a.zeit) : "";
+  button.dataset.stand = a.art;
+  button.classList.remove("primary", "oben", "unten");
+  for (const art of ["oben", "unten", "laedt", "offline", "problem", "unbekannt"]) button.classList.toggle(`st-${art}`, a.art === art);
+  // Auf dem Handy steht statt des Textes ein Zeichen (die Uhrzeit bleibt): ✓ oben, ↑ fehlt noch, ⚠ Problem
+  const kurz = { oben: "✓", unten: "↑", laedt: "↑", offline: "Offline", problem: "⚠", unbekannt: "…" }[a.art];
+  button.innerHTML = `<span class="st-kurz" aria-hidden="true">${kurz}</span><span class="st-text">${escapeHtml(a.text)}</span>`
+    + `${zeit ? `<span class="st-zeit">${escapeHtml(zeit)}</span>` : ""}`;
+  button.title = `${a.satz}\nEin Klick zeigt Einzelheiten${a.art === "unten" || a.art === "offline" ? " und lädt sofort hoch" : ""}.`;
+  button.setAttribute("aria-label", `${a.text}${zeit ? ` (${zeit})` : ""}`);
+  const kopf = !insp.hidden && insp.dataset.art === "status" ? $(".st-kopf", insp) : null;
+  if (kopf) {
+    kopf.className = `st-kopf st-${a.art}`;
+    kopf.textContent = a.satz;
+  }
 }
 
 function updateGit(git) {
-  state.git = git;
-  const button = $("#btn-sichern");
   if (!git) return;
-  const saved = git.ok && !git.changeCount && !git.ahead;
-  // „Auf GitHub ✓“ nur, wenn wirklich alles auf GitHub ist
-  if (!button.disabled) knopfZeigen(button, saved ? "oben" : "unten");
-  if (!git.ok) {
-    button.title = `Git meldet ein Problem: ${git.error}`;
-    return;
-  }
-  const last = !git.lastCommit ? ""
-    : git.github ? `\nRoman-Stand vom ${formatDate(git.lastCommit.time)} (zuletzt auf dem Laptop gesichert)`
-      : `\nZuletzt gesichert: ${formatDate(git.lastCommit.time)} – ${git.lastCommit.subject}`;
-  if (saved) {
-    button.title = `${git.github ? "Alle Änderungen von hier sind auf GitHub." : "Alles ist auf GitHub gesichert."}${last}`;
-  } else {
-    const files = git.changes.slice(0, 12).map((c) => `• ${c.path}`).join("\n");
-    const auto = git.github ? "\n\nEin Klick lädt sofort hoch." : `\n\n${git.auto || "Lädt von selbst hoch, kurz nachdem du etwas geändert hast."} Ein Klick lädt sofort hoch.`;
-    button.title = `Noch nicht auf GitHub:\n${files}${git.changeCount > 12 ? `\n… und ${git.changeCount - 12} weitere` : ""}${git.ahead ? `\n${git.ahead} Sicherung(en) noch nicht hochgeladen` : ""}${last}${auto}`;
-  }
+  state.git = git;
+  zeigeStatus();
 }
 
 async function sichern() {
-  const button = $("#btn-sichern");
-  if (quelle.modus === "github" && state.git?.ok && !state.git.changeCount) {
-    openGithubInfo(); // alles oben: zeigen, wie es steht
-    return;
-  }
-  button.disabled = true;
-  knopfZeigen(button, "laedt");
+  if (state.sichernLaeuft) return;
+  state.sichernLaeuft = true;
+  zeigeStatus();
   try {
     // Was eben noch im Feld stand (der Klick hat die Eingabe beendet), erst fertig speichern
     await Promise.all([...sitzungen.values()].map((s) => s.chain).filter(Boolean));
     const result = await quelle.sichern();
-    toast(result.message, result.detail || result.committed || "", result.ok ? 4500 : 10000);
     if (result.git) state.git = result.git;
+    if (!result.ok) toast(result.message, result.detail || "", 10000);
   } catch (err) {
     toast("Sichern ist fehlgeschlagen", err.message, 10000);
   } finally {
-    button.disabled = false;
-    updateGit(state.git);
+    state.sichernLaeuft = false;
+    zeigeStatus();
+    if (!insp.hidden && insp.dataset.art === "status") openStatus();
   }
+}
+
+/** Klick auf den Knopf: Einzelheiten zeigen – und hochladen, wenn noch etwas fehlt. */
+function statusKlick() {
+  const a = statusArt();
+  openStatus();
+  if (a.art === "unten" || a.art === "offline" || (a.art === "problem" && state.git?.changeCount)) sichern();
 }
 
 function toast(title, detail = "", ms = 3500) {
@@ -2194,7 +2555,8 @@ async function poll() {
     if (!state.online) toast(quelle.texte.wieder);
     state.online = true;
     wiederholeAlle();
-    updateGit(status.git);
+    state.git = status.git || state.git;
+    zeigeStatus();
     if (status.bearbeitung) updateEditStatus(status.bearbeitung);
     if (status.error && status.error !== state.lastError) toast(status.error, "", 8000);
     state.lastError = status.error;
@@ -2210,6 +2572,7 @@ async function poll() {
     }
     if (state.online) toast(...quelle.texte.offline, 8000);
     state.online = false;
+    zeigeStatus();
   }
   schedulePoll();
 }
@@ -2222,12 +2585,14 @@ async function reloadBook(quiet, status = null) {
   if (v?.mode === "kapitel") showChapter(entryById(v.id) ? v.id : state.book.entries[0].id, { restore: y, toHit: false });
   else if (v?.mode === "gesamt") showWhole(position?.id, { offset: position?.offset });
   else if (v?.mode === "zettel") showZettel(v.id, { restore: y });
-  if (!quiet) toast("Neuer Stand des Romans geladen", status?.modified ? `gespeichert ${formatDate(status.modified)}` : "");
+  if (!quiet) toast(quelle.modus === "github" ? "Neuer Stand von GitHub geladen" : "Neuer Stand des Romans geladen",
+    status?.modified ? `zkn3 gesichert ${kurzeZeit(status.modified, { lang: true })}` : "");
 }
 
 document.addEventListener("visibilitychange", () => {
   if (!quelle || !state.book) return;
-  // Unterwegs endet eine Eingabe, wenn die Seite in den Hintergrund geht (Deckel zu): dann wird hochgeladen.
+  // Unterwegs endet eine Eingabe, wenn die Seite in den Hintergrund geht (Deckel zu, andere App): dann wird hochgeladen.
+  if (document.hidden) schrittAbschliessen();
   if (document.hidden && quelle.modus === "github") document.activeElement?.closest?.(".ed")?.blur();
   if (!document.hidden) poll();
   else schedulePoll();
@@ -2339,37 +2704,10 @@ function zeigeEinrichtung(meldung = "", { auswahl = [], frageRepo = false, schlu
   });
 }
 
-async function openGithubInfo() {
-  openInsp("Auf GitHub", "", '<p class="hint">Wird geladen …</p>', "github");
-  try {
-    const o = await quelle.aenderungen();
-    const parts = [`<p>Roman-Stand vom ${escapeHtml(formatDate(o.stand.datum) || "?")} – so wurde er zuletzt auf dem Laptop gesichert.</p>`];
-    if (o.fehler) parts.push(`<p class="hint">Beim letzten Hochladen: ${escapeHtml(o.fehler)}</p>`);
-    if (o.hochladen.length) {
-      parts.push(`<h4>Noch nicht auf GitHub</h4><p class="hint">Sie sind auf diesem Gerät gespeichert.</p><ul class="aend-liste">${o.hochladen.map((c) => changeItem(c, [])).join("")}</ul>`
-        + '<p><button class="tb" data-github="hochladen">Jetzt hochladen</button></p>');
-    }
-    if (o.konflikte.length) {
-      parts.push(`<h4>Konflikte</h4><p class="hint">Die Stelle wurde auf dem Laptop geändert, deshalb kommt deine Fassung nicht in die zkn3. Kopiere sie bei Bedarf; den Eintrag verwirfst du im Reader auf dem Laptop.</p><ul class="aend-liste">${o.konflikte.map((c) => changeItem(c, [])).join("")}</ul>`);
-    }
-    if (o.offen.length) {
-      parts.push(`<h4>Auf GitHub, noch nicht in der zkn3</h4><p class="hint">Sie kommen hinein, sobald der Reader auf dem Laptop läuft. Bis dahin zeigt der Reader hier sie schon an.</p><ul class="aend-liste">${o.offen.map((c) => changeItem(c, [])).join("")}</ul>`);
-    }
-    if (!o.hochladen.length && !o.konflikte.length && !o.offen.length) parts.push('<p class="hint">Alle Änderungen von hier sind in der zkn3.</p>');
-    parts.push('<p class="abmelden"><button class="tb" data-github="abmelden">Zugangsschlüssel auf diesem Gerät löschen</button></p>');
-    $("#insp-body").innerHTML = parts.join("");
-  } catch (err) {
-    $("#insp-body").innerHTML = `<p class="hint">${escapeHtml(err.message)}</p>`;
-  }
-}
-
 insp.addEventListener("click", async (event) => {
   const button = event.target.closest("[data-github]");
   if (!button) return;
-  if (button.dataset.github === "hochladen") {
-    await sichern();
-    if (!insp.hidden) openGithubInfo();
-  } else if (button.dataset.github === "abmelden") {
+  if (button.dataset.github === "abmelden") {
     const o = await quelle.aenderungen();
     if (o.hochladen.length) {
       toast("Erst hochladen", `${o.hochladen.length === 1 ? "Eine Änderung ist" : `${o.hochladen.length} Änderungen sind`} noch nicht auf GitHub.`, 8000);
@@ -2380,6 +2718,48 @@ insp.addEventListener("click", async (event) => {
     location.reload();
   }
 });
+
+// ------------------------------------------------------------------ Handy: eine Zeile oben, der Rest im Menü
+// Auf schmalen Bildschirmen wandern Ansicht, Blättern, Suche, Schalter, Export ins Menü „⋯“. Es sind
+// dieselben Bedienelemente wie am Laptop (nur woanders), damit es nur einen Reader gibt.
+
+const MENU_TEILE = [["#views", "ansicht"], ["#vor", "ansicht"], ["#weiter", "ansicht"], ["#suche", "suche"],
+  ["#toggles", "anzeige"], ["#btn-schreibtisch", "mehr"], ["#btn-export", "mehr"]];
+const platzhalter = new Map();
+
+function layoutAnpassen() {
+  const handy = istHandy();
+  document.body.classList.toggle("handy", handy);
+  const menu = $("#menu");
+  for (const [sel, gruppe] of MENU_TEILE) {
+    const el = $(sel);
+    if (!el) continue;
+    if (handy && !platzhalter.has(sel)) {
+      const marke = document.createComment(sel);
+      el.before(marke);
+      platzhalter.set(sel, marke);
+      $(`.menu-gruppe[data-g="${gruppe}"]`, menu).append(el);
+    } else if (!handy && platzhalter.has(sel)) {
+      platzhalter.get(sel).replaceWith(el);
+      platzhalter.delete(sel);
+    }
+  }
+  if (!handy) menuZu();
+  hdrHeight();
+  leistePlatz();
+}
+
+function menuZu() {
+  $("#menu").hidden = true;
+  $("#btn-menu").setAttribute("aria-expanded", "false");
+}
+
+function menuUmschalten() {
+  const auf = $("#menu").hidden;
+  $("#menu").hidden = !auf;
+  $("#btn-menu").setAttribute("aria-expanded", String(auf));
+  if (auf) closeInsp();
+}
 
 // ------------------------------------------------------------------ Bedienelemente
 
@@ -2408,13 +2788,47 @@ function wireUi() {
   $("#inhalt-knopf").addEventListener("click", () => setTocOpen(!tocOpen()));
   $("#vor").addEventListener("click", () => navigate(-1));
   $("#weiter").addEventListener("click", () => navigate(1));
-  $("#btn-sichern").addEventListener("click", sichern);
+  $("#btn-sichern").addEventListener("click", statusKlick);
   $("#btn-export").addEventListener("click", exportOeffnen);
+  // Rückgängig/Wiederholen oben: nehmen dem Feld die Schreibmarke nicht (die Eingabe läuft weiter)
+  for (const button of $$("header.bar [data-act]")) button.addEventListener("mousedown", (event) => event.preventDefault());
+  $("header.bar").addEventListener("click", (event) => {
+    const act = event.target.closest("[data-act]")?.dataset.act;
+    if (act === "zurueck") rueckgaengig(true);
+    else if (act === "wieder") rueckgaengig(false);
+  });
+  $("#btn-menu").addEventListener("click", menuUmschalten);
+  $("#menu").addEventListener("click", (event) => {
+    // Eine Wahl im Menü schließt es (außer Schalter und Suchfeld)
+    if (event.target.closest("button") && !event.target.closest("#toggles")) setTimeout(menuZu, 0);
+  });
+  document.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!$("#menu").hidden && !target.closest?.("#menu, #btn-menu")) menuZu();
+    // In schmalen Fenstern liegt das Inhaltsverzeichnis über dem Text: ein Tipp daneben schließt es
+    if (!wideScreen() && tocOpen() && target.isConnected && !target.closest?.("#inhalt, #inhalt-knopf")) setTocOpen(false);
+  });
+  handyAnsicht.addEventListener("change", layoutAnpassen);
+  window.visualViewport?.addEventListener("resize", () => { leistePlatz(); markeSichtbar(); });
+  window.visualViewport?.addEventListener("scroll", leistePlatz);
+  layoutAnpassen();
+  zeigeVerlaufKnoepfe();
 
   document.addEventListener("keydown", (event) => {
-    if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
     const target = event.target;
-    if (event.key === "Escape") closeInsp();
+    const taste = (event.key || "").toLowerCase();
+    // Strg+Z / Strg+Y auch außerhalb der Felder (in einem Feld fängt der Reader sie schon ab)
+    if (!event.defaultPrevented && (event.ctrlKey || event.metaKey) && !event.altKey && (taste === "z" || taste === "y")
+        && !target.closest?.(".ed") && !target.matches?.("input, textarea, select")) {
+      event.preventDefault();
+      rueckgaengig(taste === "z" && !event.shiftKey);
+      return;
+    }
+    if (event.defaultPrevented || event.altKey || event.ctrlKey || event.metaKey) return;
+    if (event.key === "Escape") {
+      closeInsp();
+      menuZu();
+    }
     if (target.closest?.(".ed") || target.matches?.("input, textarea, select")) return;
     if (event.key === "ArrowLeft" && state.view?.mode === "kapitel") { navigate(-1); event.preventDefault(); }
     else if (event.key === "ArrowRight" && state.view?.mode === "kapitel") { navigate(1); event.preventDefault(); }
@@ -2424,7 +2838,8 @@ function wireUi() {
   let resizeTimer = null;
   window.addEventListener("resize", () => {
     hdrHeight();
-    if (settings.inhaltOffen === null) applySettings();
+    leistePlatz();
+    applySettings();
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(nummernSichtbare, 250);
   });
@@ -2441,10 +2856,17 @@ async function init() {
     window.romanQuelle = quelle;
     window.romanPruefen = () => poll();
   }
-  if (quelle.modus === "github") {
-    document.body.classList.add("unterwegs");
-    $("#btn-sichern").dataset.oeffnet = "1";
-    $("#btn-sichern").title = "Änderungen von hier auf GitHub";
+  if (quelle.modus === "github") document.body.classList.add("unterwegs");
+  // Der Stand ändert sich auch ohne Abfrage (Hochladen fertig, Verbindung weg): dann gleich zeigen
+  quelle.beobachten?.((z) => {
+    if (z.git) state.git = z.git;
+    if (z.bearbeitung) updateEditStatus(z.bearbeitung);
+    else zeigeStatus();
+  });
+  zeigeStatus();
+  // Unterwegs: die Seite selbst bleibt auch ohne Netz zu öffnen (sw.js legt sie im Browser ab)
+  if ((!LOKALER_RECHNER || new URLSearchParams(location.search).has("sw")) && "serviceWorker" in navigator) {
+    navigator.serviceWorker.register("sw.js").catch(() => {});
   }
   if (!(await quelle.bereit())) {
     zeigeEinrichtung();

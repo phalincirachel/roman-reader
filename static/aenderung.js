@@ -202,9 +202,29 @@ export function queueText(entries) {
   return `{"format": 1, "aenderungen": [${lines.length ? `\n${lines.join(",\n")}\n` : ""}]}\n`;
 }
 
+const gueltig = (e) => Boolean(e) && typeof e.id === "string" && typeof e.vorher === "string" && typeof e.nachher === "string"
+  && (e.zettel !== undefined || typeof e.datei === "string");
+
 export function parseQueue(text) {
   const data = JSON.parse(text);
   const list = Array.isArray(data?.aenderungen) ? data.aenderungen : [];
-  return list.filter((e) => e && typeof e.id === "string" && typeof e.vorher === "string" && typeof e.nachher === "string"
-    && (e.zettel !== undefined || typeof e.datei === "string"));
+  return list.filter(gueltig);
+}
+
+// Seit dem 13.11.2026 liegt jede Änderung als eigene Datei im Zweig „unterwegs“
+// (eintraege/<id>.json). Hochgeladen wird dann nur die neue Änderung, nicht alle bisherigen.
+
+/** Inhalt der Datei einer einzelnen Änderung. */
+export function eintragText(change) {
+  return `${JSON.stringify(queueEntry(change))}\n`;
+}
+
+/** Eine einzelne Änderung aus ihrer Datei – oder null, wenn die Datei nicht passt. */
+export function parseEintrag(text) {
+  try {
+    const entry = JSON.parse(text);
+    return gueltig(entry) ? entry : null;
+  } catch {
+    return null;
+  }
 }

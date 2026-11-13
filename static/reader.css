@@ -52,7 +52,7 @@ a{color:var(--accent)}
 [hidden]{display:none!important}
 
 /* Kopfleiste */
-.bar{position:sticky;top:0;z-index:20;background:var(--surface);border-bottom:1px solid var(--line);padding:.55rem 1rem;display:flex;flex-wrap:wrap;gap:.5rem 1rem;align-items:center}
+.bar{position:sticky;top:0;z-index:20;background:var(--surface);border-bottom:1px solid var(--line);padding:.55rem 1rem;display:flex;flex-wrap:wrap;gap:.5rem .8rem;align-items:center}
 .bar h1{font-family:var(--serif);font-size:1.15rem;margin:0;font-weight:600;white-space:nowrap;min-width:0;overflow:hidden;text-overflow:ellipsis}
 .bar h1 small{font-family:var(--sans);font-weight:400;color:var(--muted);font-size:.8rem;margin-left:.4rem}
 .seg-group{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
@@ -66,9 +66,24 @@ a{color:var(--accent)}
 .btn:hover{border-color:var(--accent)}
 .btn.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
 .btn:disabled{opacity:.6;cursor:progress}
-/* Ist alles auf GitHub? ruhig = ja, auffällig = nein */
-#btn-sichern.oben{background:var(--ins-bg);color:var(--ins-ink);border-color:var(--ins-line)}
-#btn-sichern.unten{background:var(--custom-bg);color:var(--custom-ink);border-color:var(--custom-ink);font-weight:600}
+/* Ist alles auf GitHub? ruhig = ja, auffällig = nein, rot = Problem (siehe statusArt in reader.js) */
+#btn-sichern{display:inline-flex;align-items:center;justify-content:center;gap:.35rem;white-space:nowrap;min-width:10.8rem}
+#btn-sichern .st-kurz{display:none}
+#btn-sichern .st-zeit{font-weight:400;font-size:.78rem;opacity:.85;font-variant-numeric:tabular-nums}
+#btn-sichern.st-oben{background:var(--ins-bg);color:var(--ins-ink);border-color:var(--ins-line)}
+#btn-sichern:is(.st-unten,.st-laedt,.st-offline){background:var(--custom-bg);color:var(--custom-ink);border-color:var(--custom-ink);font-weight:600}
+#btn-sichern.st-laedt{border-color:var(--pc-line)}
+#btn-sichern.st-problem{background:var(--del-bg);color:var(--del-ink);border-color:var(--del-ink);font-weight:700}
+/* Rückgängig, Wiederholen, Menü: Knöpfe mit Zeichen */
+.btn.symbol{display:inline-flex;align-items:center;justify-content:center;padding:.25rem .4rem;min-width:2rem}
+.btn.symbol svg{display:block;fill:currentColor}
+.btn.symbol:disabled{opacity:.38;cursor:default}
+.btn.symbol:disabled:hover{border-color:var(--line)}
+.verlauf-knoepfe{display:inline-flex;gap:.15rem}
+.verlauf-knoepfe .btn.symbol{min-width:1.85rem;padding:.25rem .3rem}
+.nur-handy{display:none!important}
+#inhalt-knopf .kurz{display:none}
+::highlight(rueckgaengig){background-color:var(--mark-bg)}
 .legend{width:100%;display:flex;flex-wrap:wrap;gap:.3rem .8rem;font-size:.78rem;color:var(--muted)}
 
 /* Inhalt */
@@ -108,7 +123,8 @@ a{color:var(--accent)}
 .toast small{display:block;opacity:.75}
 
 /* ------------------------------------------------------------ Roman */
-.bar .suche{border:1px solid var(--line);border-radius:7px;background:var(--bg);padding:.28rem .55rem;font-size:.84rem;width:11rem}
+.bar .suche{border:1px solid var(--line);border-radius:7px;background:var(--bg);padding:.28rem .55rem;font-size:.84rem;width:8rem}
+.bar h1 small{display:inline-block;max-width:22rem;overflow:hidden;text-overflow:ellipsis;vertical-align:bottom}
 .btn.warn{background:var(--custom-bg);color:var(--custom-ink);border-color:var(--pc-line)}
 .speicherstand{margin-left:auto}
 .speicherstand.ok{color:var(--muted)}
@@ -159,7 +175,7 @@ body.nur-szenen .toc-jahr li.art-jahr,body.nur-szenen .toc-jahr li.art-sonstiges
 details.vermerke{margin:.5rem 0 .2rem;font-family:var(--sans)}
 details.vermerke > summary{cursor:pointer;font-size:.8rem;color:var(--accent);width:max-content}
 .vermerke-text{margin-top:.5rem;max-height:60vh;overflow:auto;border:1px solid var(--pc-line);background:var(--pc-bg);border-radius:8px;padding:.6rem .8rem .6rem 1.2rem}
-.vermerke-text:has(.blk-tools){padding-top:1.5rem}
+.vermerke-text:has(.blk:is(.konflikt,.wartet)){padding-top:1.5rem}
 .vermerke-text .text{font-size:.98rem;font-weight:400}
 details.vermerke.leer > summary{color:var(--muted)}
 
@@ -184,7 +200,6 @@ hr.trennstrich{border:0;border-top:1px solid var(--line);width:30%;margin:1.4rem
 .nummern{position:absolute;left:-1.9rem;top:0;width:1.5rem;pointer-events:none;user-select:none;-webkit-user-select:none}
 .nummern span{position:absolute;right:0;font-size:.68rem;line-height:1.4;padding-top:.3rem;color:var(--muted);font-family:var(--sans);font-variant-numeric:tabular-nums}
 body:not(.mit-nummern) .nummern{display:none}
-.blk.titel.bearbeitet .ed{border-left:3px solid var(--custom-ink);padding-left:.7rem;margin-left:-1rem;border-radius:0 6px 6px 0}
 .blk.wartet > .ed{border-left:3px solid var(--ins-line);padding-left:.7rem;margin-left:-1rem;border-radius:0 6px 6px 0}
 .blk.konflikt > .ed{border-left:3px solid var(--del-ink);padding-left:.7rem;margin-left:-1rem}
 .text b{font-weight:700}
@@ -198,8 +213,10 @@ body:not(.mit-nummern) .nummern{display:none}
 .blk:is(.feld,.titel):hover > .blk-tools,.blk.titel:focus-within > .blk-tools{pointer-events:auto}
 .blk:is(.feld,.titel) > .blk-tools .tag{margin-right:.4rem}
 .blk:is(.feld,.titel):is(.wartet,.konflikt) > .blk-tools{opacity:1}
-/* Beim Schreiben zeigt die Schreibleiste oben den Zustand – das Feld selbst bleibt ruhig */
-.blk.feld:focus-within > .blk-tools{opacity:0;pointer-events:none}
+/* Über einem Feld steht nur dann etwas, wenn es ein Problem gibt (wie es um das Hochladen steht,
+   zeigt der Knopf oben rechts) */
+.blk:is(.feld,.titel):not(.konflikt):not(.wartet) > .blk-tools{display:none}
+.blk:is(.feld,.titel):is(.konflikt,.wartet) > .blk-tools{opacity:1;pointer-events:auto}
 mark.treffer-v{background:var(--mark-bg);color:inherit;border-radius:2px}
 
 .kap-nav{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-top:2.4rem}
@@ -264,7 +281,6 @@ body[data-einrichten="1"] .wrap{margin-left:auto!important}
   .bar h1{white-space:normal}
   .bar h1 small{display:block;margin-left:0}
   #doc{padding:1.1rem 1rem 1.4rem;border-radius:10px}
-  .blk-tools{opacity:1}
   .actions{margin-left:0}
   .bar .suche{width:8rem}
   .insp{left:0;right:0;bottom:0;width:100%;max-height:72vh;border-radius:14px 14px 0 0}
@@ -288,10 +304,12 @@ body[data-einrichten="1"] .wrap{margin-left:auto!important}
 .schreibleiste .farbe{width:1.3rem;height:1.3rem;border-radius:50%;border:2px solid var(--surface);outline:1px solid var(--line);background:var(--f);padding:0}
 .schreibleiste .farbe.ohne{background:linear-gradient(135deg,var(--surface) 45%,var(--del-ink) 47%,var(--del-ink) 53%,var(--surface) 55%)}
 .schreibleiste .farbe:hover{outline-color:var(--accent)}
-.schreibleiste .leiste-tag{white-space:nowrap}
-.schreibleiste .leiste-tag.konflikt{color:var(--del-ink);font-weight:600}
-.schreibleiste .tb{border:1px solid var(--line);background:transparent;border-radius:6px;padding:.1rem .45rem;font-size:.74rem}
-.schreibleiste .tb:hover{border-color:var(--accent);color:var(--accent)}
+.schreibleiste .verlauf{display:inline-flex;align-items:center;gap:.15rem;padding-right:.4rem;border-right:1px solid var(--line)}
+.schreibleiste .verlauf > button{display:inline-flex;align-items:center;justify-content:center;min-width:1.75rem;height:1.75rem;border:1px solid transparent;border-radius:6px;background:transparent;padding:0 .25rem;color:var(--ink)}
+.schreibleiste .verlauf > button:hover:not(:disabled){border-color:var(--line);background:var(--surface-2)}
+.schreibleiste .verlauf > button:disabled{opacity:.35;cursor:default}
+.schreibleiste .formate[hidden] + .fertig{margin-left:0}
+.schreibleiste .fertig{display:none;border:1px solid var(--accent);background:var(--accent);color:var(--accent-ink);border-radius:8px;padding:0 .9rem;font-size:.92rem;font-weight:600}
 
 /* Material: jeder Block lässt sich anklicken und als Markdown bearbeiten */
 .md-blk{position:relative;border-radius:6px;margin:0 -.4rem;padding:0 .4rem;cursor:text}
@@ -301,3 +319,74 @@ body[data-einrichten="1"] .wrap{margin-left:auto!important}
 .md-blk.konflikt{outline:2px solid var(--del-ink)}
 .md-quelle.ed{font-family:var(--serif);font-size:.98rem;line-height:1.55;background:var(--bg);box-shadow:0 0 0 1px var(--accent);padding:.4rem .6rem;margin:0}
 .md-blk.bearbeiten + .md-blk,.md-blk + .md-blk.bearbeiten{margin-top:.6rem}
+
+/* Speicherstand (Klick auf den Knopf oben rechts) */
+.st-kopf{font-weight:600;margin:.1rem 0 .7rem;line-height:1.4}
+.st-kopf.st-oben{color:var(--ins-ink)}
+.st-kopf:is(.st-unten,.st-laedt,.st-offline){color:var(--custom-ink)}
+.st-kopf.st-problem{color:var(--del-ink)}
+.aend-liste.kurz li{padding:.28rem 0}
+
+/* ------------------------------------------------------------ Handy
+   Eine Zeile oben: Inhalt · Kapitel · Rückgängig/Wiederholen · Stand · Menü „⋯“ (darin Ansicht,
+   Blättern, Suche, Schalter, Export – dieselben Bedienelemente wie am Laptop, siehe layoutAnpassen).
+   Das Blatt füllt die Breite, die Schreibleiste sitzt unten über der Tastatur. */
+@media (max-width:640px){
+  .bar{gap:.3rem;padding:.35rem max(.45rem,env(safe-area-inset-right)) .35rem max(.45rem,env(safe-area-inset-left));align-items:center}
+  .bar .actions{display:contents}
+  .bar #inhalt-knopf{order:-1}
+  .bar h1{order:0;flex:1 1 0;min-width:0;white-space:nowrap}
+  .bar h1 #titel{display:none}
+  .bar h1 small{display:block;margin:0;font-family:var(--serif);font-size:1rem;font-weight:600;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .bar h1:has(#ort:empty) #titel{display:inline}
+  .bar #ort .ort-abschnitt{display:none}
+  .verlauf-knoepfe,#btn-sichern,#btn-menu{order:1}
+  .nur-handy{display:inline-flex!important}
+  .bar .btn{min-height:2.5rem;min-width:2.5rem;font-size:.95rem;padding:.25rem .5rem}
+  #inhalt-knopf .lang{display:none}
+  #inhalt-knopf .kurz{display:block}
+  #inhalt-knopf{display:inline-flex;align-items:center;justify-content:center}
+  #btn-sichern{min-width:2.5rem}
+  #btn-sichern .st-text{display:none}
+  #btn-sichern .st-kurz{display:inline;font-size:1.05rem;line-height:1}
+  #btn-sichern.st-offline .st-kurz{font-size:.85rem}
+  .legend{order:5}
+  .menu{position:absolute;right:max(.4rem,env(safe-area-inset-right));top:calc(100% + .3rem);width:min(23rem,calc(100vw - .8rem));max-height:calc(100dvh - var(--hdr,4rem) - 1rem);overflow:auto;background:var(--surface);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);padding:.8rem;display:flex;flex-direction:column;gap:.8rem;z-index:45}
+  .menu[hidden]{display:none}
+  .menu-gruppe{display:flex;flex-wrap:wrap;gap:.45rem;align-items:center}
+  .menu-gruppe:empty{display:none}
+  .menu .seg-group button{padding:.5rem 1rem;font-size:.95rem}
+  .menu .btn{min-height:2.6rem;padding:.35rem .9rem;font-size:.95rem}
+  .menu #vor,.menu #weiter{min-width:3rem}
+  .menu .suche{width:100%;font-size:1rem;padding:.55rem .7rem}
+  .menu .toggles{flex-direction:column;align-items:flex-start;gap:.65rem;font-size:.98rem;color:var(--ink)}
+  .menu .toggles input{width:1.15rem;height:1.15rem}
+  .wrap{padding:0 0 8rem}
+  #doc{margin-top:0;border:0;border-radius:0;padding:1rem max(1.05rem,env(safe-area-inset-right)) 1.6rem max(1.05rem,env(safe-area-inset-left))}
+  .text{font-size:1.07rem;line-height:1.62}
+  .kind-heading.lvl-1 .titel > .text{font-size:1.42rem;margin-top:.5rem}
+  .kind-heading.lvl-2 .titel > .text{font-size:1.2rem}
+  .lvl-1 .titelzeile > .kopieren{margin-top:.75rem}
+  .kap-ort{font-size:.68rem}
+  .inhalt{width:min(86vw,22rem);font-size:.92rem;line-height:1.55;padding-bottom:calc(3rem + env(safe-area-inset-bottom))}
+  .toc-jahr li{padding:.15rem .9rem .15rem 1.2rem}
+  .kap-nav{grid-template-columns:1fr;gap:.6rem}
+  .kap-nav a.weiter{grid-column:1}
+  .schreibleiste{left:0;right:0;max-width:none;border-radius:0;border-width:1px 0 0;justify-content:space-between;flex-wrap:nowrap;padding:.3rem max(.4rem,env(safe-area-inset-right)) calc(.3rem + env(safe-area-inset-bottom)) max(.4rem,env(safe-area-inset-left));gap:.2rem;box-shadow:0 -4px 16px rgba(30,28,25,.12)}
+  .schreibleiste .verlauf > button,.schreibleiste .formate > button{min-width:2.1rem;height:2.4rem;font-size:1.05rem;padding:0 .2rem}
+  .schreibleiste .verlauf{padding-right:.3rem}
+  .schreibleiste .formate{gap:0}
+  .schreibleiste .fertig{display:inline-flex;align-items:center;height:2.4rem;margin-left:auto;padding:0 .75rem;flex:none}
+  .schreibleiste .farbwahl{top:auto;bottom:calc(100% + .4rem);left:auto;right:0}
+  .schreibleiste .farbe{width:1.8rem;height:1.8rem}
+  body.schreibt .toast{bottom:calc(4.2rem + env(safe-area-inset-bottom))}
+  .toast{bottom:calc(1rem + env(safe-area-inset-bottom))}
+  .insp{max-height:80dvh;padding-bottom:calc(.9rem + env(safe-area-inset-bottom))}
+  .einrichten{font-size:1rem}
+  .einrichten input,.einrichten select{font-size:1rem;padding:.6rem .7rem}
+  .einrichten .btn{min-height:2.6rem;padding:.4rem 1rem}
+}
+@media (max-width:360px){
+  .bar .btn{min-width:2.3rem;padding:.2rem .35rem}
+  .verlauf-knoepfe{gap:0}
+}

@@ -2,11 +2,17 @@
 <html lang="de">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://api.github.com; object-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="referrer" content="no-referrer">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#22201d" media="(prefers-color-scheme: dark)">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Roman">
 <title>Roman · Reader</title>
 <link rel="icon" href="static/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="static/icon-180.png">
+<link rel="manifest" href="static/manifest.webmanifest">
 <link rel="stylesheet" href="static/reader.css">
 <script type="module" src="static/reader.js"></script>
 </head>
@@ -23,13 +29,24 @@
     <label><input type="checkbox" data-t="nummern"> Absatznummern</label>
   </div>
   <div class="actions">
-    <button class="btn" id="inhalt-knopf" aria-controls="inhalt" aria-expanded="false" title="Inhaltsverzeichnis ein- und ausklappen">Inhalt</button>
+    <button class="btn" id="inhalt-knopf" aria-controls="inhalt" aria-expanded="false" title="Inhaltsverzeichnis ein- und ausklappen" aria-label="Inhalt"><span class="lang">Inhalt</span><svg class="kurz" viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></button>
     <button class="btn" id="vor" title="Voriges Kapitel (←)" aria-label="Voriges Kapitel">←</button>
     <button class="btn" id="weiter" title="Nächstes Kapitel (→)" aria-label="Nächstes Kapitel">→</button>
-    <input type="search" class="suche" id="suche" placeholder="Suchen …" aria-label="Im Roman suchen" autocomplete="off" spellcheck="false">
+    <input type="search" class="suche" id="suche" placeholder="Suchen …" aria-label="Im Roman suchen" autocomplete="off" spellcheck="false" enterkeyhint="search">
     <button class="btn warn" id="btn-schreibtisch" hidden>Schreibtisch-Fassungen</button>
     <button class="btn" id="btn-export" data-oeffnet="1" title="Den ganzen Stand als Datei herunterladen (für den Fall ohne Internet)">Export</button>
-    <button class="btn primary" id="btn-sichern" title="Alles auf GitHub sichern">Sichern</button>
+    <span class="verlauf-knoepfe">
+      <button class="btn symbol" id="btn-zurueck" data-act="zurueck" title="Rückgängig (Strg+Z)" aria-label="Rückgängig" disabled><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M9 14 4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      <button class="btn symbol" id="btn-wieder" data-act="wieder" title="Wiederholen (Strg+Y)" aria-label="Wiederholen" disabled><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="m15 14 5-5-5-5M20 9H9.5a5.5 5.5 0 0 0 0 11H13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+    </span>
+    <button class="btn status" id="btn-sichern" data-oeffnet="1" title="Speicherstand">Sichern</button>
+    <button class="btn symbol nur-handy" id="btn-menu" data-oeffnet="1" aria-controls="menu" aria-expanded="false" aria-label="Weitere Bedienelemente" title="Ansicht, Suche, Export"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg></button>
+  </div>
+  <div class="menu" id="menu" hidden>
+    <div class="menu-gruppe" data-g="ansicht"></div>
+    <div class="menu-gruppe" data-g="suche"></div>
+    <div class="menu-gruppe" data-g="anzeige"></div>
+    <div class="menu-gruppe" data-g="mehr"></div>
   </div>
   <div class="legend" hidden>
     <span class="ungesichert" id="ungesichert" hidden role="alert"></span>
@@ -43,6 +60,10 @@
   <article id="doc" lang="de" aria-live="polite"><p class="leer">Der Roman wird geladen …</p></article>
 </div>
 <div class="schreibleiste" id="schreibleiste" hidden role="toolbar" aria-label="Schreiben">
+  <span class="verlauf">
+    <button type="button" data-act="zurueck" title="Rückgängig (Strg+Z)" aria-label="Rückgängig" disabled><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><path d="M9 14 4 9l5-5M4 9h10.5a5.5 5.5 0 0 1 0 11H11" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+    <button type="button" data-act="wieder" title="Wiederholen (Strg+Y)" aria-label="Wiederholen" disabled><svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><path d="m15 14 5-5-5-5M20 9H9.5a5.5 5.5 0 0 0 0 11H13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+  </span>
   <span class="formate">
     <button type="button" data-fmt="bold" title="Fett (Strg+B)" aria-label="Fett"><b>F</b></button>
     <button type="button" data-fmt="italic" title="Kursiv (Strg+I)" aria-label="Kursiv"><i>K</i></button>
@@ -52,8 +73,7 @@
     <button type="button" data-fmt="removeFormat" title="Formatierung der Auswahl entfernen" aria-label="Formatierung entfernen" class="weg">T<small>×</small></button>
     <span class="farbwahl" hidden></span>
   </span>
-  <span class="leiste-tag"></span>
-  <button type="button" class="tb" data-act="leiste-verwerfen" hidden>Bearbeitung verwerfen</button>
+  <button type="button" class="fertig" data-act="fertig" title="Eingabe beenden (Esc)">Fertig</button>
 </div>
 
 <aside class="insp" id="insp" hidden aria-label="Einzelheiten">

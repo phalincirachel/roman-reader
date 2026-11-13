@@ -109,6 +109,9 @@ export function klartext(text) {
 /**
  * Stücke wieder als Zetteltext mit Codes. Jede Art wird für sich geöffnet und geschlossen
  * (das Programm liest sie ebenso einzeln); an einer Stelle erst schließen, dann öffnen.
+ * Zeilenumbrüche am Rand einer Formatierung stehen außerhalb der Codes: Wer drei Zeilen samt
+ * Umbruch färbt, bekommt „[color …]…[/color]“ und dann den Umbruch – nicht „[/color]“ allein
+ * am Anfang der nächsten Zeile (dort machte er aus einer Leerzeile eine Zeile mit Text).
  */
 export function zusammensetzen(stuecke) {
   let out = "";
@@ -120,7 +123,19 @@ export function zusammensetzen(stuecke) {
     if (neu.color !== null && jetzt.color !== neu.color) out += `[color ${neu.color}]`;
     jetzt = { ...neu };
   };
+  const teile = [];
   for (const stueck of stuecke) {
+    const formatiert = stueck.f || stueck.k || stueck.u || stueck.d || (stueck.color ?? null) !== null;
+    const m = formatiert ? /^(\n*)([\s\S]*?)(\n*)$/.exec(stueck.text || "") : null;
+    if (!m) {
+      teile.push(stueck);
+      continue;
+    }
+    if (m[1]) teile.push({ text: m[1], ...KEIN });
+    if (m[2]) teile.push({ ...stueck, text: m[2] });
+    if (m[3]) teile.push({ text: m[3], ...KEIN });
+  }
+  for (const stueck of teile) {
     if (!stueck.text) continue;
     wechsel({ f: Boolean(stueck.f), k: Boolean(stueck.k), u: Boolean(stueck.u), d: Boolean(stueck.d), color: stueck.color ?? null });
     out += stueck.text;
