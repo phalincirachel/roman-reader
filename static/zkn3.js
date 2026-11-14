@@ -16,6 +16,7 @@ const WS_RUN_RE = new RegExp(`[${W}]+`, "gu");
 export const MATERIAL_GROUPS = [
   ["Handlung", ["handlung.md"]],
   ["Figuren", ["charaktere/*.md"]],
+  ["Pläne", ["plan*.md"]],
   ["Gedanken", ["Gedanken*.md"]],
   ["Weiteres", ["vorschlag*.md", "modemsettings.md"]],
 ];
