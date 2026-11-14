@@ -234,18 +234,29 @@ export function githubQuelle({ apiBase, test = false }) {
     return 0;
   }
 
-  async function gh(path, { method = "GET", body = null, accept = "application/vnd.github+json", bytes = false } = {}) {
+  async function gh(path, options = {}) {
+    const controller = new AbortController();
+    // Auch der Antworttext kann hängen, nachdem die Kopfzeilen schon angekommen sind.
+    const timer = setTimeout(() => controller.abort(), 30000);
+    try {
+      return await ghAntwort(path, { ...options, signal: controller.signal });
+    } catch (err) {
+      if (err instanceof GithubFehler) throw err;
+      throw new GithubFehler(0, controller.signal.aborted
+        ? "GitHub antwortet zu lange nicht. Bitte noch einmal versuchen."
+        : "Keine Verbindung zu GitHub.");
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function ghAntwort(path, { method = "GET", body = null, accept = "application/vnd.github+json", bytes = false, signal } = {}) {
     const headers = { Accept: accept };
     if (s.zugang?.token) headers.Authorization = `Bearer ${s.zugang.token}`;
     if (body) headers["Content-Type"] = "application/json";
     if (method !== "GET") notiereSchreiben();
-    let response;
-    try {
-      response = await fetch(apiBase + path, { method, headers, body: body ? JSON.stringify(body) : undefined,
-        cache: "no-cache", referrerPolicy: "no-referrer" });
-    } catch {
-      throw new GithubFehler(0, "Keine Verbindung zu GitHub.");
-    }
+    const response = await fetch(apiBase + path, { method, headers, body: body ? JSON.stringify(body) : undefined,
+      signal, cache: "no-cache", referrerPolicy: "no-referrer" });
     if (!response.ok) {
       let message = "";
       try {

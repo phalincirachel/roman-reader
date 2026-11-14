@@ -2897,4 +2897,4 @@ async function init() {
   poll();
 }
 
-init();
+export const bereit = init();

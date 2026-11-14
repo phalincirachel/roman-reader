@@ -11,7 +11,7 @@ const WARTEN = 4000; // so lange auf das Netz warten, dann der zwischengespeiche
 // Alles, was die Seite braucht – gleich beim ersten Besuch abgelegt (veroeffentlichen.py prüft,
 // dass hier jede Datei aus static/ steht)
 const DATEIEN = [
-  "./", "static/reader.css", "static/reader.js", "static/daten.js", "static/quelle-github.js", "static/quelle-lokal.js",
+  "./", "static/reader.css", "static/start.js", "static/reader.js", "static/daten.js", "static/quelle-github.js", "static/quelle-lokal.js",
   "static/zkn3.js", "static/aenderung.js", "static/pytext.js", "static/textsatz.js", "static/format.js", "static/export.js",
   "static/verlauf.js", "static/markdown.js", "static/vendor/marked.esm.js", "static/icon.svg", "static/icon-192.png", "static/icon-512.png",
   "static/icon-180.png", "static/icon-maskable-512.png", "static/manifest.webmanifest", "static/roman.ico",
