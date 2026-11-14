@@ -12,7 +12,8 @@ import {
 } from "./textsatz.js";
 import { marked } from "./vendor/marked.esm.js";
 import { LOKALER_RECHNER, waehleQuelle } from "./daten.js";
-import { cleanNachher, titelZeile, zeilenAenderung } from "./aenderung.js";
+import { applyChange, titelZeile, zeilenAenderung } from "./aenderung.js";
+import { markdownSetzen, markdownLesen, markdownKlartext } from "./markdown.js";
 import { kindOf } from "./zkn3.js";
 import { FARBEN, OHNE_FARBE, domLesen, feldHtml, klartext, zerlege, zusammensetzen } from "./format.js";
 import { exportHtml, exportName, leseExport } from "./export.js";
@@ -126,7 +127,6 @@ const state = {
   extra: new Map(), // Zettel außerhalb der Anordnung, die gerade angezeigt werden
   material: [],
   materialText: null, // Text der gerade angezeigten Material-Datei
-  materialNeu: false, // gespeichert, aber noch nicht neu gesetzt (ein anderer Block stand offen)
   view: null, // { mode, id | path }
   term: "",
   hitIndex: 0,
@@ -286,6 +286,7 @@ function go(hash) {
 
 async function route() {
   if (!state.book) return;
+  document.activeElement?.closest?.("#doc .ed")?.blur();
   let target = parseHash();
   const saved = store.get("position", null);
   if (!target) {
@@ -317,7 +318,6 @@ function setView(mode) {
   }
   if (mode !== "material") {
     state.materialText = null;
-    state.materialNeu = false;
   }
   nummernSicht.disconnect();
   sichtbar.clear();
@@ -734,6 +734,13 @@ function nummernSetzen(block) {
     return;
   }
   block.dataset.nummern = "1";
+  if (istMaterial(ed)) {
+    const oben = block.getBoundingClientRect().top;
+    const abschnitte = $$('h1,h2,h3,h4,h5,h6,p,li,pre,tr', ed)
+      .filter((el) => !el.matches('li:has(p),li:has(li)') && !el.closest('[hidden]'));
+    gutter.innerHTML = abschnitte.map((el, i) => `<span style="top:${Math.round(el.getBoundingClientRect().top - oben)}px">${i + 1}</span>`).join('');
+    return;
+  }
   const { stellen, plain } = textStellen(ed);
   const oben = block.getBoundingClientRect().top;
   const range = document.createRange();
@@ -780,9 +787,11 @@ function nummernBald(block) {
 // ------------------------------------------------------------------ Bearbeiten
 
 const feldVonEd = (ed) => ed.closest(".blk")?.dataset.feld || "content";
+const istMaterial = (ed) => ed?.classList.contains("md-editor");
 
 /** Was im Feld steht: Text mit Formatcodes (Text), sonst reiner Text; ein Titel als eine Zeile. */
 function edText(ed) {
+  if (istMaterial(ed)) return markdownLesen(ed);
   const feld = feldVonEd(ed);
   const text = domLesen(ed, { formate: feld === "content" });
   return feld === "title" ? titelZeile(text) : text;
@@ -794,6 +803,7 @@ function containerEntry(element) {
 
 /** Endet der Text mit einer leeren Zeile, braucht sie einen Platzhalter, sonst ist sie unsichtbar. */
 function ensureEnde(ed) {
+  if (istMaterial(ed)) return; // Markdown enthält echte Überschriften, Absätze, Listen und Tabellen
   // Ein Platzhalter mitten im Text (dahinter wurde weitergeschrieben) ist eine echte Zeile
   for (const br of $$("br[data-ende]", ed)) {
     if (br !== ed.lastChild) br.replaceWith(document.createTextNode("\n"));
@@ -984,14 +994,14 @@ function zustand(s, status, detail = "") {
 function zeigeUngesichert() {
   const el = $("#ungesichert");
   const offen = [...sitzungen.values()].filter((s) => s.zustand === "nichtGespeichert" || s.zustand === "konflikt");
-  const material = $$(".md-blk.nicht-gespeichert", doc).length;
-  const n = offen.length + material;
+  const material = [...materialSitzungen.values()].filter((s) => s.versuche || s.konflikt);
+  const n = offen.length + material.length;
   if (!n) {
     el.hidden = true;
     el.textContent = "";
   } else {
-    const konflikt = offen.some((s) => s.zustand === "konflikt");
-    const ziel = offen[0] ? `#kapitel/${encodeURIComponent(offen[0].zettel)}` : "#";
+    const konflikt = offen.some((s) => s.zustand === "konflikt") || material.some((s) => s.konflikt);
+    const ziel = offen[0] ? `#kapitel/${encodeURIComponent(offen[0].zettel)}` : `#material/${escapeHtml(material[0].datei)}`;
     el.innerHTML = `<a href="${ziel}">⚠ ${n === 1 ? "Ein Text ist" : `${n} Texte sind`} noch nicht gespeichert`
       + `${konflikt ? " (Konflikt – bitte entscheiden)" : ` – ${escapeHtml(quelle?.texte?.nichtErreichbar || "keine Verbindung")}`}. Dein Text bleibt im Feld.</a>`;
     el.hidden = false;
@@ -1233,7 +1243,7 @@ function auswahlIn(ed) {
     const r = document.createRange();
     r.selectNodeContents(ed);
     r.setEnd(container, offset);
-    return domLesen(r.cloneContents(), { formate: false }).length;
+    return istMaterial(ed) ? textStellen(r.cloneContents()).plain.length : domLesen(r.cloneContents(), { formate: false }).length;
   };
   return { start: vor(range.startContainer, range.startOffset), end: vor(range.endContainer, range.endOffset) };
 }
@@ -1284,6 +1294,7 @@ function nachEingabe(ed) {
 
 /** Getippt (oder formatiert): Sitzung aktuell halten, Rettungskopie, gleich speichern. */
 function eingabe(ed) {
+  if (istMaterial(ed)) { materialEingabe(ed); return; }
   const s = ed._sitzung || startSitzung(ed, { ausDemZettel: true }); // auch ohne focusin (manche Browser)
   if (!s) return;
   s.aktiv = true;
@@ -1300,13 +1311,9 @@ function eingabe(ed) {
 doc.addEventListener("focusin", (event) => {
   const ed = event.target.closest?.(".ed");
   if (!ed) return;
-  const blk = ed.closest(".md-blk");
-  if (blk) {
-    // Ein Material-Block, der noch zum Bearbeiten offen steht (sein Text ist schon gespeichert)
-    if (!ed._material && state.view?.mode === "material") {
-      ed._material = { id: uid(), datei: state.view.path, start: Number(blk.dataset.s), vorher: domLesen(ed, { formate: false }) };
-    }
-    versteckeLeiste();
+  if (istMaterial(ed)) {
+    materialSitzung(ed);
+    zeigeLeiste(ed);
     return;
   }
   const s = ed._sitzung || startSitzung(ed);
@@ -1320,7 +1327,7 @@ doc.addEventListener("focusin", (event) => {
 // Steht die Schreibmarke in einem Text, gehört die Schreibleiste dazu (auch wenn ein Browser kein focusin meldet)
 document.addEventListener("selectionchange", () => {
   const ed = document.activeElement?.closest?.("#doc .ed");
-  if (ed && !ed.closest(".md-blk") && leisteEd !== ed && (feldVonEd(ed) !== "title" || istHandy())) zeigeLeiste(ed);
+  if (ed && leisteEd !== ed && (feldVonEd(ed) !== "title" || istHandy())) zeigeLeiste(ed);
   if (ed) markeSichtbar();
 });
 
@@ -1328,7 +1335,7 @@ document.addEventListener("selectionchange", () => {
 // Menü des Browsers oder einer Geste der Bildschirmtastatur geht über denselben Verlauf.)
 doc.addEventListener("beforeinput", (event) => {
   const ed = event.target.closest?.(".ed");
-  if (!ed || ed.closest(".md-blk")) return;
+  if (!ed) return;
   if (event.inputType === "historyUndo" || event.inputType === "historyRedo") {
     event.preventDefault();
     rueckgaengig(event.inputType === "historyUndo");
@@ -1341,11 +1348,6 @@ doc.addEventListener("input", (event) => {
   const ed = event.target.closest?.(".ed");
   if (!ed) return;
   ensureEnde(ed);
-  if (ed.closest(".md-blk")) {
-    clearTimeout(ed._rettungTimer);
-    ed._rettungTimer = setTimeout(() => materialMerken(ed), 400);
-    return;
-  }
   if (leisteEd !== ed && (feldVonEd(ed) !== "title" || istHandy())) zeigeLeiste(ed);
   if (offenerSchritt?.ed === ed) offenerSchritt.letzte = Date.now();
   eingabe(ed);
@@ -1356,8 +1358,10 @@ doc.addEventListener("input", (event) => {
 doc.addEventListener("focusout", (event) => {
   const ed = event.target.closest?.(".ed");
   if (!ed) return;
-  if (ed.closest(".md-blk")) {
+  if (istMaterial(ed)) {
+    if (offenerSchritt?.ed === ed) schrittAbschliessen();
     materialFertig(ed);
+    if (!leiste.contains(event.relatedTarget)) versteckeLeiste();
     return;
   }
   if (offenerSchritt?.ed === ed) schrittAbschliessen();
@@ -1377,18 +1381,17 @@ const FORMAT_TASTEN = { b: "bold", i: "italic", u: "underline" };
 doc.addEventListener("keydown", (event) => {
   const ed = event.target.closest?.(".ed");
   if (!ed) return;
-  const material = Boolean(ed.closest(".md-blk"));
   const taste = (event.key || "").toLowerCase();
-  if ((event.ctrlKey || event.metaKey) && !event.altKey && !material && (taste === "z" || taste === "y")) {
+  if ((event.ctrlKey || event.metaKey) && !event.altKey && (taste === "z" || taste === "y")) {
     event.preventDefault(); // Rückgängig (Strg+Z) und Wiederholen (Strg+Y, Strg+Umschalt+Z) über den eigenen Verlauf
     rueckgaengig(taste === "z" && !event.shiftKey);
     return;
   }
   if (event.key === "Enter" && !event.isComposing) {
     event.preventDefault();
-    if (!material && feldVonEd(ed) === "title") ed.blur(); // ein Titel ist eine Zeile: Enter beendet die Eingabe
+    if (feldVonEd(ed) === "title") ed.blur(); // ein Titel ist eine Zeile: Enter beendet die Eingabe
     else {
-      if (!material) schrittBeginnen(ed, "insertParagraph");
+      schrittBeginnen(ed, "insertParagraph");
       insertText(event.shiftKey ? "\n\n" : "\n"); // Enter: neue Zeile, Umschalt+Enter: neuer Absatz
     }
   } else if (event.key === "Escape") {
@@ -1397,8 +1400,7 @@ doc.addEventListener("keydown", (event) => {
   } else if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && FORMAT_TASTEN[event.key.toLowerCase()]) {
     event.preventDefault();
     const was = FORMAT_TASTEN[event.key.toLowerCase()];
-    if (material) markdownFormat(was);
-    else if (feldVonEd(ed) === "content") formatieren(was); // Titel und Vermerke bleiben reiner Text
+    if (feldVonEd(ed) === "content") formatieren(was); // Titel und Vermerke bleiben reiner Text
   }
 }, true);
 
@@ -1408,7 +1410,7 @@ doc.addEventListener("paste", (event) => {
   event.preventDefault();
   const text = (event.clipboardData?.getData("text/plain") || "").replace(/\r\n?/g, "\n");
   schrittBeginnen(ed, "einfuegen");
-  insertText(!ed.closest(".md-blk") && feldVonEd(ed) === "title" ? text.replace(/\s*\n\s*/g, " ") : text);
+  insertText(feldVonEd(ed) === "title" ? text.replace(/\s*\n\s*/g, " ") : text);
   schrittBeginnen(ed, "einfuegen"); // was danach getippt wird, ist ein neuer Schritt
 });
 
@@ -1430,19 +1432,19 @@ window.addEventListener("pagehide", () => {
     bodies.push({ zettel: s.zettel, feld: s.feld, start: change.start, vorher: change.vorher,
       nachher: change.nachher, sitzung: s.id, fertig: true });
   }
-  for (const ed of $$(".md-blk .ed")) materialMerken(ed);
+  for (const s of materialSitzungen.values()) materialMerken(s.ed);
   // … dann noch schnell senden (ohne auf Antwort zu warten)
   if (bodies.length && quelle) quelle.verlassen(bodies);
-  for (const ed of $$(".md-blk .ed")) {
-    const sitzung = ed._material;
-    const jetzt = sitzung ? domLesen(ed, { formate: false }) : null;
-    if (sitzung && jetzt !== sitzung.vorher) quelle?.materialVerlassen?.({ ...sitzung, nachher: jetzt });
+  for (const s of materialSitzungen.values()) {
+    const change = zeilenAenderung(s.vorher, s.vorher, edText(s.ed));
+    if (change && !s.promise && !s.konflikt) quelle?.materialVerlassen?.({ datei: s.datei, sitzung: s.id, ...change });
   }
   quelle?.fensterZu?.();
 });
 
 /** Was „Kopieren“ in die Zwischenablage legt: Überschrift und Text (ohne Formatcodes, Vermerke und Angaben). */
 function copyText(container) {
+  if (container.matches(".material")) return markdownKlartext($(".md-editor", container));
   const title = titelZeile(domLesen($('.blk[data-feld="title"] .ed', container), { formate: false }));
   const ed = $('.blk[data-feld="content"] .ed', container);
   const text = ed ? domLesen(ed, { formate: false }) : "";
@@ -1474,7 +1476,7 @@ async function toClipboard(text) {
 }
 
 async function copyChapter(button) {
-  const container = button.closest(".kapitel");
+  const container = button.closest(".kapitel, .material");
   if (!container) return;
   const text = copyText(container);
   if (await toClipboard(text)) {
@@ -1495,6 +1497,8 @@ doc.addEventListener("click", (event) => {
   }
   const button = event.target.closest('[data-act="verwerfen"]');
   if (button) {
+    const material = $(".md-editor", button.closest(".blk"));
+    if (material) { materialKonflikt(material, false); return; }
     // nur bei einem Konflikt da: deinen Text bewusst aufgeben (sonst gibt es „Rückgängig“)
     const s = $(":scope > .ed", button.closest(".blk"))?._sitzung;
     if (s) verwirfSitzung(s);
@@ -1502,13 +1506,18 @@ doc.addEventListener("click", (event) => {
   }
   const durch = event.target.closest('[data-act="durchsetzen"]');
   if (durch) {
+    const material = $(".md-editor", durch.closest(".blk"));
+    if (material) { materialKonflikt(material, true); return; }
     const s = $(":scope > .ed", durch.closest(".blk"))?._sitzung;
     if (s) durchsetzen(s);
     return;
   }
-  const blk = event.target.closest?.(".md-blk");
-  if (blk && !blk.classList.contains("bearbeiten") && !event.target.closest("a[href]") && !String(window.getSelection()).trim()) {
-    materialBearbeiten(blk, event);
+  const link = event.target.closest(".md-editor a[href]");
+  if (link && !String(window.getSelection()).trim()) {
+    event.preventDefault();
+    document.activeElement?.closest?.(".ed")?.blur();
+    if (link.getAttribute("href").startsWith("#")) location.hash = link.getAttribute("href");
+    else window.open(link.href, "_blank", "noopener,noreferrer");
   }
 });
 
@@ -1581,19 +1590,12 @@ function planeSpeichern(ed) {
 
 function formatieren(befehl, wert) {
   const ed = document.activeElement?.closest?.(".ed");
-  if (!ed || feldVonEd(ed) !== "content" || ed.closest(".md-blk")) return;
+  if (!ed || feldVonEd(ed) !== "content") return;
   schrittBeginnen(ed, "formatieren"); // Formatieren ist ein eigener Schritt (Rückgängig)
   document.execCommand(befehl, false, wert ?? null);
   ensureEnde(ed);
   schrittBeginnen(ed, "formatieren");
   planeSpeichern(ed); // nicht jeder Browser meldet Formatierungen als Eingabe
-}
-
-/** Im Material (Markdown): **fett**, *kursiv* um die Auswahl. */
-function markdownFormat(was) {
-  const zeichen = { bold: "**", italic: "*" }[was];
-  if (!zeichen) return;
-  insertText(`${zeichen}${String(window.getSelection())}${zeichen}`);
 }
 
 function baueLeiste() {
@@ -1638,12 +1640,13 @@ let offenerSchritt = null;
 
 /** Vor einer Änderung (das Feld zeigt noch den alten Stand): gehört sie zum laufenden Schritt? */
 function schrittBeginnen(ed, typ = "") {
-  if (!ed || ed.closest(".md-blk")) return;
+  if (!ed) return;
   const block = ed.closest(".blk");
   const entry = containerEntry(ed);
-  if (!entry || !block) return;
+  const material = istMaterial(ed) ? materialSitzung(ed) : null;
+  if ((!entry && !material) || !block) return;
   const feld = block.dataset.feld || "content";
-  const key = fkey(entry.id, feld);
+  const key = material ? `datei\u0000${material.datei}` : fkey(entry.id, feld);
   const now = Date.now();
   const loeschen = typ.startsWith("delete");
   const o = offenerSchritt;
@@ -1651,7 +1654,9 @@ function schrittBeginnen(ed, typ = "") {
     && o.loeschen === loeschen;
   if (!weiter) {
     schrittAbschliessen();
-    offenerSchritt = { key, zettel: entry.id, feld, titel: entry.title, vorText: edText(ed), ed, loeschen, bruch: BRUCH.has(typ), letzte: now };
+    offenerSchritt = { key, art: material ? "datei" : "feld", datei: material?.datei, zettel: entry?.id, feld,
+      titel: entry?.title || state.material.find((m) => m.path === material?.datei)?.title,
+      vorText: edText(ed), vorAuswahl: material ? auswahlIn(ed) : null, ed, loeschen, bruch: BRUCH.has(typ), letzte: now };
     zeigeVerlaufKnoepfe();
   }
   offenerSchritt.letzte = now;
@@ -1662,9 +1667,10 @@ function schrittAbschliessen() {
   const o = offenerSchritt;
   if (!o) return;
   offenerSchritt = null;
-  const nach = o.ed?.isConnected ? edText(o.ed) : sitzungen.get(o.key)?.jetzt;
+  const nach = o.ed?.isConnected || o.art === "datei" ? edText(o.ed) : sitzungen.get(o.key)?.jetzt;
   if (typeof nach !== "string") return;
-  const schritt = schrittVon(o.vorText, nach, { art: "feld", key: o.key, zettel: o.zettel, feld: o.feld, titel: o.titel });
+  const schritt = schrittVon(o.vorText, nach, { art: o.art, key: o.key, datei: o.datei, zettel: o.zettel, feld: o.feld, titel: o.titel,
+    ...(o.art === "datei" ? { vorAuswahl: o.vorAuswahl, nachAuswahl: auswahlIn(o.ed) } : {}) });
   if (schritt) {
     verlauf.neu(schritt);
     zeigeVerlaufKnoepfe();
@@ -1803,16 +1809,18 @@ async function materialSchritt(schritt, zurueck) {
     history.pushState(null, "", `#material/${schritt.datei}`);
     await showMaterial(schritt.datei);
   }
-  const vorher = zurueck ? schritt.neu : schritt.alt;
-  const nachher = zurueck ? schritt.alt : schritt.neu;
-  const result = await quelle.materialAendern({ datei: schritt.datei, start: schritt.at, vorher, nachher, sitzung: uid() });
-  if (result.git) updateGit(result.git);
-  if (result.status === "konflikt" || result.status === "fehler") return result.meldung || "Die Stelle wurde inzwischen anderswo geändert.";
-  if (typeof result.text === "string" && state.view?.path === schritt.datei) {
-    state.materialText = result.text;
-    if (!$$(".md-blk.bearbeiten", doc).length) zeigeMaterial(schritt.datei, { scroll: window.scrollY });
-  }
-  loadMaterial();
+  const ed = $(".md-editor", doc);
+  if (!ed) return "Die Datei ließ sich nicht öffnen.";
+  const ergebnis = anwenden(edText(ed), schritt, zurueck);
+  if (!ergebnis) return "Die Stelle wurde inzwischen anderswo geändert.";
+  materialSitzung(ed);
+  materialSetzen(ed, ergebnis.text);
+  materialMerken(ed);
+  if (document.activeElement === ed) {
+    // Die Einfügemarke bleibt im selben Feld; der nächste Tastendruck schreibt hier weiter.
+    setzeAuswahl(ed, (zurueck ? schritt.vorAuswahl : schritt.nachAuswahl) || { start: 0, end: 0 });
+    materialEingabe(ed);
+  } else await materialFertig(ed);
   return null;
 }
 
@@ -1827,11 +1835,6 @@ function rueckgaengig(zurueck = true) {
 
 async function verlaufSchritt(zurueck) {
   try {
-    const material = document.activeElement?.closest?.(".md-blk .ed");
-    if (material) {
-      material.blur(); // ein offener Material-Block wird erst gespeichert – das ist dann der letzte Schritt
-      for (let i = 0; i < 50 && $$(".md-blk.speichert", doc).length; i += 1) await new Promise((r) => setTimeout(r, 100));
-    }
     schrittAbschliessen();
     const stapelVon = zurueck ? verlauf.zurueck : verlauf.vor;
     const schritt = stapelVon.pop();
@@ -2108,224 +2111,206 @@ insp.addEventListener("click", async (event) => {
   }
 });
 
-// ------------------------------------------------------------------ Material: lesen und blockweise bearbeiten
-// Jeder Block (Überschrift, Absatz, Liste, Tabelle …) steht gesetzt da. Ein Klick zeigt ihn als
-// Markdown zum Bearbeiten; Esc oder ein Klick daneben speichert ihn und setzt ihn wieder.
+// ------------------------------------------------------------------ Material: durchgehendes Schreibfeld
+
+const materialSitzungen = new Map(); // ungespeicherte Felder bleiben auch beim Blättern erhalten
+const materialKey = (s) => `datei\u0000${s.datei}\u0000${s.id}`;
 
 function resolvePath(base, href) {
-  try {
-    return decodeURIComponent(new URL(href, `http://x/${base}`).pathname.slice(1));
-  } catch {
-    return href;
-  }
+  try { return decodeURIComponent(new URL(href, `http://x/${base}`).pathname.slice(1)); }
+  catch { return href; }
 }
 
-/** Die Blöcke einer Markdown-Datei mit ihrer Lage im Text – oder null, wenn das nicht aufgeht. */
-function materialBloecke(text) {
-  let tokens;
-  try {
-    tokens = marked.lexer(text, { gfm: true });
-  } catch {
-    return null;
-  }
-  let pos = 0;
-  const parts = [];
-  for (const token of tokens) {
-    const raw = token.raw ?? "";
-    if (text.slice(pos, pos + raw.length) !== raw) return null;
-    const start = pos;
-    pos += raw.length;
-    if (token.type === "space" || !raw.trim()) continue;
-    const quelltext = raw.replace(/\n+$/, "");
-    const html = marked.parser(Object.assign([token], { links: tokens.links }), { gfm: true });
-    parts.push(`<div class="md-blk" data-s="${start}" data-e="${start + quelltext.length}">${html}</div>`);
-  }
-  return pos === text.length ? parts.join("") : null;
+function materialSetzen(ed, text) {
+  const path = ed.closest('[data-datei]').dataset.datei;
+  markdownSetzen(ed, text, (node) => {
+    for (const a of $$('a[href]', node)) {
+      const href = a.getAttribute('href');
+      if (/^[a-z][a-z0-9+.-]*:/i.test(href)) {
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+      } else if (!href.startsWith('#')) {
+        const target = state.material.find((m) => m.path === resolvePath(path, href.split('#')[0]));
+        if (target) a.setAttribute('href', `#material/${target.path}`);
+        else a.removeAttribute('href');
+      }
+    }
+  });
 }
 
 function zeigeMaterial(path, { scroll = null } = {}) {
   const item = state.material.find((m) => m.path === path);
-  const bloecke = materialBloecke(state.materialText);
-  doc.innerHTML = `<div class="md" data-datei="${escapeHtml(path)}"><span class="kap-ort">Material · ${escapeHtml(item?.group ?? "")}${bloecke === null ? " · nur lesen" : ""}</span>`
-    + `${bloecke ?? marked.parse(state.materialText, { gfm: true })}${bloecke === "" ? '<div class="md-blk" data-s="0" data-e="0"><p class="hint">Leer – hineinklicken und schreiben</p></div>' : ""}</div>`;
-  for (const a of $$("a[href]", doc)) {
-    const href = a.getAttribute("href");
-    if (/^[a-z][a-z0-9+.-]*:/i.test(href)) {
-      a.target = "_blank";
-      a.rel = "noopener noreferrer";
-    } else if (!href.startsWith("#")) {
-      const target = state.material.find((m) => m.path === resolvePath(path, href.split("#")[0]));
-      if (target) a.setAttribute("href", `#material/${target.path}`);
-      else a.removeAttribute("href");
-    }
-  }
+  doc.innerHTML = `<div class="material" data-datei="${escapeHtml(path)}"><span class="kap-ort">Material · ${escapeHtml(item?.group ?? '')}</span>`
+    + `<button type="button" class="kopieren" data-act="kopieren" title="Überschrift und Text kopieren" aria-label="Überschrift und Text kopieren">${COPY_ICON}</button>`
+    + `<div class="blk feld material-feld" data-feld="content">${toolbarHtml('content')}<div class="nummern" aria-hidden="true"></div>`
+    + `<div class="text ed md md-editor" contenteditable="true" spellcheck="true" data-leer="${LEER_HINWEIS.content}"></div></div></div>`;
+  const ed = $('.md-editor', doc);
+  const offen = materialSitzungen.get(path);
+  if (offen) {
+    ed.replaceWith(offen.ed); // das DOM enthält die Zuordnung zum ursprünglichen Markdown
+    setBlockState(offen.ed.closest('.blk'), offen.konflikt ? 'konflikt' : offen.versuche ? 'nichtGespeichert' : '');
+  } else materialSetzen(ed, state.materialText);
   if (scroll !== null) window.scrollTo(0, scroll);
+  nummernAlle();
 }
 
 async function showMaterial(path) {
-  setView("material");
-  state.view = { mode: "material", path };
+  setView('material');
+  state.view = { mode: 'material', path };
   const item = state.material.find((m) => m.path === path);
   updatePlace(null, item?.title || path);
   markCurrentMaterial(path);
   doc.innerHTML = '<p class="leer">Wird geladen …</p>';
   try {
-    const text = await quelle.materialText(path);
+    const text = materialSitzungen.get(path)?.vorher ?? await quelle.materialText(path);
     if (state.view?.path !== path) return;
     state.materialText = text;
     zeigeMaterial(path);
   } catch (err) {
-    doc.innerHTML = `<p class="leer">Die Datei ließ sich nicht laden (${escapeHtml(err.message)}).</p>`;
+    if (state.view?.path === path) doc.innerHTML = `<p class="leer">Die Datei ließ sich nicht laden (${escapeHtml(err.message)}).</p>`;
   }
   window.scrollTo(0, 0);
 }
 
-/** Wo im Markdown ungefähr geklickt wurde: hinter dem Text, der vor der Klickstelle steht. */
-function klickStelle(blk, event, quelltext) {
-  let davor = "";
-  try {
-    const punkt = document.caretPositionFromPoint?.(event.clientX, event.clientY);
-    const range = document.createRange();
-    range.selectNodeContents(blk);
-    if (punkt) range.setEnd(punkt.offsetNode, punkt.offset);
-    else {
-      const r = document.caretRangeFromPoint?.(event.clientX, event.clientY);
-      if (!r) return quelltext.length;
-      range.setEnd(r.startContainer, r.startOffset);
-    }
-    davor = range.toString();
-  } catch {
-    return quelltext.length;
-  }
-  for (const laenge of [24, 14, 8, 4]) {
-    const probe = davor.slice(-laenge);
-    if (probe.length < Math.min(laenge, davor.length) || !probe.trim()) continue;
-    const at = quelltext.indexOf(probe);
-    if (at >= 0) return at + probe.length;
-  }
-  return davor.trim() ? quelltext.length : 0;
+function materialSitzung(ed) {
+  if (ed._material) return ed._material;
+  const datei = ed.closest('[data-datei]').dataset.datei;
+  const s = { id: uid(), datei, vorher: edText(ed), ed, versuche: 0 };
+  ed._material = s;
+  materialSitzungen.set(datei, s);
+  return s;
 }
 
-function materialBearbeiten(blk, event) {
-  const s = Number(blk.dataset.s);
-  const e = Number(blk.dataset.e);
-  const quelltext = state.materialText.slice(s, e);
-  const ziel = klickStelle(blk, event, quelltext);
-  blk._gesetzt = blk.innerHTML;
-  blk.classList.add("bearbeiten");
-  blk.innerHTML = `<div class="text ed md-quelle" contenteditable="true" spellcheck="true">${escapeHtml(quelltext)}${quelltext.endsWith("\n") ? '<br data-ende="">' : ""}</div>`;
-  const ed = blk.firstElementChild;
-  ed._material = { id: uid(), datei: state.view.path, start: s, vorher: quelltext };
-  ed.focus();
-  const { stellen } = textStellen(ed);
-  const found = knotenBei(stellen, ziel);
-  if (found) {
-    const range = document.createRange();
-    range.setStart(found[0], Math.max(0, Math.min(ziel - found[1], found[0].length)));
-    range.collapse(true);
-    const selection = window.getSelection();
-    selection.removeAllRanges();
-    selection.addRange(range);
-  }
-}
-
-const materialKey = (sitzung) => `datei\u0000${sitzung.datei}\u0000${sitzung.id}`;
-
-/** Rettungskopie eines Material-Blocks, der gerade bearbeitet wird (übersteht Neuladen und Absturz). */
 function materialMerken(ed) {
-  const sitzung = ed._material;
-  if (!sitzung) return;
-  const nachher = domLesen(ed, { formate: false });
-  if (nachher === sitzung.vorher && !sitzung.versuche) {
-    rettung.loeschen(materialKey(sitzung));
-    return;
+  const s = ed._material;
+  if (!s) return;
+  const change = zeilenAenderung(s.vorher, s.vorher, edText(ed));
+  if (!change && !s.promise) { rettung.loeschen(materialKey(s)); return; }
+  if (change) rettung.merken({ key: materialKey(s), art: 'datei', datei: s.datei, ...change,
+    raw: s.vorher, jetzt: edText(ed), sitzung: s.id, zeit: new Date().toISOString() });
+}
+
+function materialEingabe(ed) {
+  const s = materialSitzung(ed);
+  clearTimeout(s.rettungTimer);
+  s.rettungTimer = setTimeout(() => materialMerken(ed), 400);
+  clearTimeout(s.timer);
+  s.timer = setTimeout(() => materialFertig(ed), 1500);
+  zeigeStatus();
+}
+
+function materialAbschliessen(s) {
+  if (document.activeElement === s.ed || edText(s.ed) !== s.vorher || s.promise || s.konflikt) return;
+  rettung.loeschen(materialKey(s));
+  materialSitzungen.delete(s.datei);
+  delete s.ed._material;
+  if (s.ed.isConnected) {
+    if (s.stand !== undefined) materialSetzen(s.ed, s.stand);
+    nummernBald(s.ed.closest('.blk'));
   }
-  rettung.merken({ key: materialKey(sitzung), art: "datei", datei: sitzung.datei, start: sitzung.start, vorher: sitzung.vorher,
-    nachher, sitzung: sitzung.id, zeit: new Date().toISOString() });
 }
 
 async function materialFertig(ed) {
-  const sitzung = ed._material;
-  if (!sitzung) return;
-  delete ed._material;
-  clearTimeout(sitzung.timer);
-  const blk = ed.closest(".md-blk");
-  const jetzt = domLesen(ed, { formate: false });
-  const path = sitzung.datei;
-  const hier = () => state.view?.mode === "material" && state.view.path === path;
-  // Neu gesetzt wird erst, wenn kein anderer Block mehr offen ist (sonst ginge dort Getipptes verloren)
-  const andereOffen = () => $$(".md-blk.bearbeiten", doc).some((b) => b !== blk);
-  if (jetzt === sitzung.vorher) {
-    rettung.loeschen(materialKey(sitzung));
-    if (blk && blk._gesetzt !== undefined && !state.materialNeu) {
-      blk.innerHTML = blk._gesetzt; // unverändert: nur diesen Block wieder setzen
-      blk.classList.remove("bearbeiten", "konflikt", "nicht-gespeichert");
-    } else if (hier() && !andereOffen()) {
-      state.materialNeu = false;
-      zeigeMaterial(path, { scroll: window.scrollY });
-    }
-    zeigeUngesichert();
+  const s = ed._material;
+  if (!s || s.konflikt) return;
+  clearTimeout(s.timer);
+  clearTimeout(s.rettungTimer);
+  materialMerken(ed);
+  if (s.promise) {
+    await s.promise;
+    if (!s.konflikt && !s.versuche) return materialFertig(ed);
     return;
   }
-  materialMerken(Object.assign(ed, { _material: sitzung })); // erst die Rettungskopie …
-  delete ed._material;
-  blk?.classList.add("speichert");
-  try {
-    const result = await quelle.materialAendern({ datei: path, start: sitzung.start, vorher: sitzung.vorher, nachher: jetzt, sitzung: sitzung.id });
-    blk?.classList.remove("speichert", "nicht-gespeichert");
-    if (result.git) updateGit(result.git);
-    if (result.status === "konflikt" || result.status === "fehler") {
-      // Nichts wird verworfen: der Text bleibt im Block und in der Rettungskopie
-      ed._material = { ...sitzung, konflikt: true };
-      blk?.classList.add("konflikt");
-      toast(result.status === "konflikt" ? "Nicht gespeichert: dieser Abschnitt wurde inzwischen anderswo geändert" : "Nicht gespeichert",
-        `${result.meldung || ""} Dein Text bleibt im Block – kopiere ihn, bevor du die Seite neu lädst.`, 15000);
-      return;
-    }
-    rettung.loeschen(materialKey(sitzung));
-    if (result.status === "gespeichert" || result.status === "offen") {
-      const item = state.material.find((m) => m.path === path);
-      verlauf.neu({ art: "datei", key: `datei\u0000${path}`, datei: path, titel: item?.title || path, at: sitzung.start,
-        alt: sitzung.vorher, neu: cleanNachher("content", jetzt), vor: "", nach: "", zeit: Date.now() });
-      zeigeVerlaufKnoepfe();
-    }
-    if (hier() && !ed.isConnected) {
-      state.materialText = result.text; // der Block ist schon weg (anderes Kapitel): nur den Stand merken
-    } else if (hier()) {
-      state.materialText = result.text;
-      if (andereOffen()) state.materialNeu = true;
-      else {
-        state.materialNeu = false;
-        zeigeMaterial(path, { scroll: window.scrollY });
+  const jetzt = edText(ed);
+  const change = zeilenAenderung(s.vorher, s.vorher, jetzt);
+  if (!change) { materialAbschliessen(s); return; }
+  const block = () => s.ed.closest('.blk');
+  const senden = async () => {
+    try {
+      const result = await quelle.materialAendern({ datei: s.datei, sitzung: s.id, ...change });
+      if (result.git) updateGit(result.git);
+      const erwartet = applyChange(s.vorher, change);
+      // Eine verlorene Antwort darf beim erneuten Senden keine doppelte Änderung erzeugen.
+      if (['konflikt', 'fehler'].includes(result.status) && result.text !== erwartet) {
+        s.konflikt = true;
+        s.stand = result.text;
+        setBlockState(block(), 'konflikt', result.meldung || 'Die Stelle wurde anderswo geändert.');
+        return;
       }
+      rettung.loeschen(materialKey(s));
+      s.id = uid(); // unterwegs ist jeder gespeicherte Schritt abgeschlossen
+      s.vorher = jetzt;
+      s.stand = result.text ?? erwartet;
+      s.versuche = 0;
+      setBlockState(block(), '');
+      if (state.view?.path === s.datei) {
+        state.materialText = s.stand;
+        const title = $('h1', ed)?.textContent;
+        if (title) updatePlace(null, title);
+      }
+      materialMerken(ed);
+      loadMaterial();
+    } catch (err) {
+      s.versuche += 1;
+      setBlockState(block(), 'nichtGespeichert');
+      materialMerken(ed);
+      s.timer = setTimeout(() => materialFertig(ed), Math.min(30000, 1500 * 2 ** Math.min(s.versuche - 1, 5)));
     }
-    loadMaterial(); // die Überschrift kann sich geändert haben (Inhaltsverzeichnis)
-  } catch (err) {
-    // Nicht erreichbar: Text bleibt, Rettungskopie bleibt, später von selbst noch einmal
-    sitzung.versuche = (sitzung.versuche || 0) + 1;
-    ed._material = sitzung;
-    blk?.classList.remove("speichert");
-    blk?.classList.add("nicht-gespeichert");
-    materialMerken(ed);
-    if (sitzung.versuche === 1) {
-      toast("Noch nicht gespeichert", `${quelle?.texte?.nichtErreichbar || "Keine Verbindung"}. Dein Text bleibt im Block und wird von selbst gespeichert.`, 12000);
-    }
-    const pause = Math.min(30000, 1500 * 2 ** Math.min(sitzung.versuche - 1, 5));
-    sitzung.timer = setTimeout(() => {
-      if (ed._material !== sitzung) return;
-      if (document.activeElement === ed) return; // wird gerade bearbeitet: beim Verlassen
-      materialFertig(ed);
-    }, pause);
-  } finally {
-    zeigeUngesichert();
+  };
+  s.promise = senden();
+  zeigeStatus();
+  await s.promise;
+  s.promise = null;
+  if (!s.konflikt && !s.versuche) {
+    if (edText(ed) !== s.vorher) {
+      if (document.activeElement !== ed) return materialFertig(ed);
+      materialEingabe(ed);
+    } else materialAbschliessen(s);
   }
+  zeigeUngesichert();
+  zeigeStatus();
 }
+
+async function materialKonflikt(ed, speichern) {
+  const s = ed?._material;
+  if (!s) return;
+  if (!speichern && !confirm('Deine nicht gespeicherte Fassung verwerfen?')) return;
+  try {
+    const aktuell = await quelle.materialText(s.datei);
+    rettung.loeschen(materialKey(s));
+    s.vorher = aktuell;
+    s.stand = aktuell;
+    s.konflikt = false;
+    s.versuche = 0;
+    if (!speichern) materialSetzen(ed, aktuell);
+    materialMerken(ed);
+    setBlockState(ed.closest('.blk'), '');
+    await materialFertig(ed);
+  } catch (err) { toast('Nicht gespeichert', err.message); }
+}
+
 
 /** Beim Öffnen: eine Rettungskopie aus dem Material noch einmal speichern – oder zum Kopieren zeigen. */
 async function materialRettung(r) {
+  if (typeof r.raw === 'string' && typeof r.jetzt === 'string') {
+    const container = document.createElement('div');
+    container.dataset.datei = r.datei;
+    const ed = document.createElement('div');
+    ed.className = 'text ed md md-editor';
+    ed.contentEditable = 'true';
+    ed.spellcheck = true;
+    ed.dataset.leer = LEER_HINWEIS.content;
+    container.append(ed);
+    materialSetzen(ed, r.jetzt);
+    const s = { id: r.sitzung || uid(), datei: r.datei, vorher: r.raw, ed, versuche: 0 };
+    ed._material = s;
+    materialSitzungen.set(r.datei, s);
+    await materialFertig(ed);
+    return;
+  }
   try {
     const result = await quelle.materialAendern({ datei: r.datei, start: r.start, vorher: r.vorher, nachher: r.nachher, sitzung: r.sitzung });
-    const schonDa = typeof result.text === "string" && result.text.includes(String(r.nachher).replace(/^\n+|\n+$/g, ""));
+    const schonDa = Boolean(r.nachher?.trim()) && typeof result.text === "string" && result.text.includes(String(r.nachher).replace(/^\n+|\n+$/g, ""));
     if (result.status !== "konflikt" && result.status !== "fehler") {
       rettung.loeschen(r.key);
       toast("Nicht gespeicherter Text wiederhergestellt", `${r.datei} – jetzt gespeichert.`, 8000);
@@ -2443,9 +2428,9 @@ function statusArt() {
   const git = state.git;
   const github = quelle?.modus === "github";
   const sitz = [...sitzungen.values()];
-  const nichtGespeichert = sitz.filter((s) => s.zustand === "nichtGespeichert").length + $$(".md-blk.nicht-gespeichert", doc).length;
-  const konflikte = sitz.filter((s) => s.zustand === "konflikt").length;
-  const tippt = sitz.some((s) => s.zustand === "ungespeichert" || s.zustand === "speichert") || $$(".md-blk.speichert", doc).length > 0;
+  const nichtGespeichert = sitz.filter((s) => s.zustand === "nichtGespeichert").length + [...materialSitzungen.values()].filter((s) => s.versuche && !s.konflikt).length;
+  const konflikte = sitz.filter((s) => s.zustand === "konflikt").length + [...materialSitzungen.values()].filter((s) => s.konflikt).length;
+  const tippt = sitz.some((s) => s.zustand === "ungespeichert" || s.zustand === "speichert") || [...materialSitzungen.values()].some((s) => s.promise || edText(s.ed) !== s.vorher);
   const n = (count, one, many) => `${count} ${count === 1 ? one : many}`;
   if (!github && !state.online) {
     return { art: "problem", text: "Dienst antwortet nicht",
