@@ -206,9 +206,11 @@ async function loadBook() {
 
 async function loadMaterial() {
   try {
-    state.material = await quelle.material();
+    const material = await quelle.material();
+    if (JSON.stringify(material) === JSON.stringify(state.material)) return;
+    state.material = material;
   } catch {
-    state.material = [];
+    return; // Bei einem Abruffehler das vorhandene Inhaltsverzeichnis behalten.
   }
   if (state.book) buildToc();
 }
@@ -452,7 +454,10 @@ function showChapter(id, { restore = null, toHit = true } = {}) {
 function showMissing(message) {
   setView("other");
   state.view = { mode: "other" };
-  doc.innerHTML = `<p class="leer">${escapeHtml(message)} <a href="#kapitel/${escapeHtml(state.book.entries[0]?.id ?? "")}">Zum Anfang</a></p>`;
+  markCurrent(null);
+  updatePlace(null, "Nicht mehr vorhanden");
+  const first = state.book.entries[0];
+  doc.innerHTML = `<p class="leer">${escapeHtml(message)}${first ? ` <a href="#kapitel/${escapeHtml(first.id)}">Zum Anfang</a>` : ""}</p>`;
 }
 
 function scrollToHit(n) {
@@ -2545,6 +2550,14 @@ async function poll() {
     if (status.bearbeitung) updateEditStatus(status.bearbeitung);
     if (status.error && status.error !== state.lastError) toast(status.error, "", 8000);
     state.lastError = status.error;
+    // Material kann sich ändern, ohne dass die zkn3 einen neuen Stand bekommt.
+    // Nur die Navigation erneuern: ein offenes Schreibfeld bleibt dabei erhalten.
+    await loadMaterial();
+    if (state.view?.mode === "material" && !state.material.some((m) => m.path === state.view.path)
+        && !document.activeElement?.closest?.("#doc .ed") && !state.saving
+        && !materialSitzungen.has(state.view.path)) {
+      showMissing("Diese Datei gehört nicht mehr zum Material.");
+    }
     const stand = status.stand || status.version;
     if (stand && state.book && stand !== state.version) {
       if (document.activeElement?.closest?.("#doc .ed") || state.saving) state.reloadWanted = true;
@@ -2566,10 +2579,15 @@ async function reloadBook(quiet, status = null) {
   const position = capturePosition();
   const y = window.scrollY;
   await loadBook();
+  await loadMaterial();
   const v = state.view;
-  if (v?.mode === "kapitel") showChapter(entryById(v.id) ? v.id : state.book.entries[0].id, { restore: y, toHit: false });
+  if (v?.mode === "kapitel") showChapter(v.id, { restore: y, toHit: false });
   else if (v?.mode === "gesamt") showWhole(position?.id, { offset: position?.offset });
-  else if (v?.mode === "zettel") showZettel(v.id, { restore: y });
+  else if (v?.mode === "zettel") await showZettel(v.id, { restore: y });
+  else if (v?.mode === "material" && state.material.some((m) => m.path === v.path)) {
+    await showMaterial(v.path);
+    window.scrollTo(0, y);
+  }
   if (!quiet) toast(quelle.modus === "github" ? "Neuer Stand von GitHub geladen" : "Neuer Stand des Romans geladen",
     status?.modified ? `zkn3 gesichert ${kurzeZeit(status.modified, { lang: true })}` : "");
 }
