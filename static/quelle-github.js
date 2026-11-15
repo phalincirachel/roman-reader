@@ -169,6 +169,7 @@ export function githubQuelle({ apiBase, test = false }) {
     fehler: null,
     offline: false,
     ohneNetz: false, // ohne Verbindung geöffnet (mit dem zuletzt geladenen Stand)
+    prueft: false, // gespeicherter Stand sichtbar, GitHub-Abgleich läuft noch
     zugangFehler: null,
     geladen: null,
     laeuft: false,
@@ -495,6 +496,14 @@ export function githubQuelle({ apiBase, test = false }) {
   function laden() {
     if (!s.geladen) {
       s.geladen = nacheinander(async () => {
+        // Beim Wiederöffnen keine Netzantwort abwarten. status() gleicht danach ab.
+        try {
+          await ladeOhneNetz(new GithubFehler(0, "Noch kein vollständiger Stand auf diesem Gerät."));
+          s.prueft = true;
+          return;
+        } catch {
+          // Beim ersten Öffnen oder unvollständigem Speicher aus dem Netz laden.
+        }
         try {
           await ladeStand(await ladeKopf());
           setzeSchlange(await holeSchlange());
@@ -529,6 +538,7 @@ export function githubQuelle({ apiBase, test = false }) {
     const warOhne = s.offline;
     s.offline = false;
     s.ohneNetz = false;
+    s.prueft = false;
     merkeStand();
     if (warOhne) aufraeumenCache();
     if (s.lokal.length) planeHochladen();
@@ -604,7 +614,7 @@ export function githubQuelle({ apiBase, test = false }) {
       ok: !s.zugangFehler, error: s.zugangFehler?.message || s.fehler, github: true,
       changeCount: s.lokal.length, ahead: 0,
       changes: s.lokal.map((e) => ({ path: e.titel || e.datei || `Zettel ${e.zettel}` })),
-      laeuft: s.laeuft, offline: s.offline, ohneNetz: s.ohneNetz, fehler: s.fehler,
+      laeuft: s.laeuft, offline: s.offline, ohneNetz: s.ohneNetz, prueft: s.prueft, fehler: s.fehler,
       zuletztOben: lokaleZeit(s.zuletztOben),
       standOben: neueste(s.zkn3Stand?.datum, s.schlange.datum, s.zuletztOben),
       wartetAufLaptop: wartetAufLaptop().length,
@@ -1179,6 +1189,7 @@ export function githubQuelle({ apiBase, test = false }) {
       try {
         await nacheinander(nachsehen);
       } catch (err) {
+        s.prueft = false;
         if (err.status === 0) {
           s.offline = true;
           melde();

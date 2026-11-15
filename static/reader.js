@@ -118,6 +118,60 @@ function setTocOpen(open) {
   setTimeout(nummernSichtbare, 250); // die Breite des Blatts ändert sich
 }
 
+// In der schmalen Touch-Ansicht: rechts wischen öffnet den Inhalt, links wischen schließt ihn.
+// Nur eine deutlich waagerechte Geste abfangen: Scrollen, Zoomen und Tippen bleiben beim Browser.
+function inhaltWischen() {
+  let geste = null;
+  const hatAuswahl = () => window.getSelection()?.isCollapsed === false;
+  document.addEventListener("touchstart", (event) => {
+    geste = null;
+    const target = event.target;
+    if (event.defaultPrevented || wideScreen() || event.touches.length !== 1 || !state.book || hatAuswahl()
+        || !insp.hidden || !$("#menu").hidden
+        || !target.closest?.("#doc, #inhalt")
+        || target.closest("button, input, textarea, select, summary, [role=button]")
+        || target.closest("#doc a")
+        || document.activeElement?.isContentEditable
+        || document.activeElement?.matches("input, textarea, select")) return;
+    const touch = event.touches[0];
+    // Am Bildschirmrand gehören Wischgesten weiterhin der Browser-Navigation.
+    if (touch.clientX < 20 || touch.clientX > innerWidth - 20) return;
+    for (let el = target; el && el !== document.body; el = el.parentElement) {
+      if (el.scrollWidth > el.clientWidth + 1 && /auto|scroll/.test(getComputedStyle(el).overflowX)) return;
+    }
+    geste = { x: touch.clientX, y: touch.clientY, id: touch.identifier, zeit: event.timeStamp, offen: tocOpen() };
+  }, { passive: true });
+  document.addEventListener("touchmove", (event) => {
+    if (!geste) return;
+    const touch = event.touches[0];
+    if (event.defaultPrevented || event.touches.length !== 1 || touch.identifier !== geste.id
+        || event.timeStamp - geste.zeit > 650 || hatAuswahl()
+        || (Math.abs(touch.clientY - geste.y) > 12
+            && Math.abs(touch.clientY - geste.y) >= Math.abs(touch.clientX - geste.x))) {
+      geste = null;
+      return;
+    }
+    const dx = touch.clientX - geste.x;
+    if ((dx > 0) !== geste.offen && Math.abs(dx) >= 12
+        && Math.abs(dx) >= 2 * Math.abs(touch.clientY - geste.y) && event.cancelable) event.preventDefault();
+  }, { passive: false });
+  document.addEventListener("touchcancel", () => { geste = null; }, { passive: true });
+  document.addEventListener("touchend", (event) => {
+    const start = geste;
+    geste = null;
+    if (!start || wideScreen() || event.touches.length || event.changedTouches.length !== 1
+        || event.timeStamp - start.zeit > 650 || hatAuswahl() || tocOpen() !== start.offen) return;
+    const touch = event.changedTouches[0];
+    const dx = touch.clientX - start.x;
+    const dy = touch.clientY - start.y;
+    if (touch.identifier !== start.id || Math.abs(dx) < 60 || Math.abs(dx) < 2 * Math.abs(dy)) return;
+    const auf = dx > 0;
+    if (auf === start.offen || !event.cancelable) return;
+    event.preventDefault(); // der Wischer darf anschließend weder einen Link noch ein Schreibfeld antippen
+    setTocOpen(auf);
+  }, { passive: false });
+}
+
 // ------------------------------------------------------------------ Zustand
 
 const state = {
@@ -2467,6 +2521,8 @@ function statusArt() {
     return { art: "unten", text: "Noch nicht auf GitHub", satz };
   }
   const zeit = github ? git.standOben : git.zuletztOben || git.lastCommit?.time;
+  if (github && git.prueft) return { art: "unbekannt", text: "Stand wird abgeglichen …", zeit,
+    satz: "Der gespeicherte Stand ist geöffnet. Änderungen von GitHub werden im Hintergrund abgeholt." };
   return { art: "oben", text: "Auf GitHub ✓", zeit,
     satz: `Alles ist auf GitHub${zeit ? ` – Stand ${kurzeZeit(zeit, { lang: true })}` : ""}.` };
 }
@@ -2789,6 +2845,7 @@ function wireUi() {
     }
   });
   $("#inhalt-knopf").addEventListener("click", () => setTocOpen(!tocOpen()));
+  inhaltWischen();
   $("#vor").addEventListener("click", () => navigate(-1));
   $("#weiter").addEventListener("click", () => navigate(1));
   $("#btn-sichern").addEventListener("click", statusKlick);

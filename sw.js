@@ -1,13 +1,13 @@
 // Hält die Seite des Readers im Browser bereit, damit sie sich auch ohne Netz öffnen lässt
 // (unterwegs: Chromebook, Handy). Nur die Seite selbst – den Roman legt quelle-github.js ab.
 //
-// Immer zuerst aus dem Netz (so kommt jede neue Fassung des Readers sofort an); nur wenn das
-// nicht klappt oder zu lange dauert, aus dem Zwischenspeicher. Anfragen an GitHub (api.github.com)
-// und alles außerhalb der Seite fasst er nicht an.
+// Die vollständige Programmfassung liegt im Zwischenspeicher und startet ohne Netzwartezeit.
+// Jede Veröffentlichung bekommt eine neue Cache-Kennung. Der Browser lädt neue Fassungen
+// im Hintergrund; erst eine vollständig geladene Fassung wird aktiviert.
+// Anfragen an GitHub (api.github.com) und alles außerhalb der Seite fasst er nicht an.
 // Veröffentlicht wird diese Datei neben index.html (reader/veroeffentlichen.py).
 
-const CACHE = "roman-app-1";
-const WARTEN = 4000; // so lange auf das Netz warten, dann der zwischengespeicherte Stand
+const CACHE = "roman-app-03d9ba62ae4257fb7793"; // veroeffentlichen.py setzt hier die Prüfsumme der Programmfassung ein
 // Alles, was die Seite braucht – gleich beim ersten Besuch abgelegt (veroeffentlichen.py prüft,
 // dass hier jede Datei aus static/ steht)
 const DATEIEN = [
@@ -20,8 +20,11 @@ const DATEIEN = [
 self.addEventListener("install", (event) => {
   event.waitUntil((async () => {
     const cache = await caches.open(CACHE);
-    await Promise.all(DATEIEN.map((url) =>
-      fetch(url, { cache: "reload" }).then((r) => (r.ok ? cache.put(url, r) : null)).catch(() => null)));
+    await Promise.all(DATEIEN.map(async (url) => {
+      const response = await fetch(url, { cache: "reload" });
+      if (!response.ok) throw new Error("Programmdatei nicht erreichbar");
+      await cache.put(url, response);
+    }));
     await self.skipWaiting();
   })());
 });
@@ -33,20 +36,6 @@ self.addEventListener("activate", (event) => {
   })());
 });
 
-function ausDemNetz(request) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("zu langsam")), WARTEN);
-    // über die Adresse (eine Seitenanfrage selbst lässt sich nicht mit Optionen weiterreichen)
-    fetch(request.url, { cache: "no-cache", credentials: "same-origin" }).then((response) => {
-      clearTimeout(timer);
-      resolve(response);
-    }, (err) => {
-      clearTimeout(timer);
-      reject(err);
-    });
-  });
-}
-
 self.addEventListener("fetch", (event) => {
   const request = event.request;
   const url = new URL(request.url);
@@ -56,14 +45,10 @@ self.addEventListener("fetch", (event) => {
   const key = seite ? "./" : request;
   event.respondWith((async () => {
     const cache = await caches.open(CACHE);
-    try {
-      const response = await ausDemNetz(request);
-      if (response.ok) await cache.put(key, response.clone());
-      return response;
-    } catch {
-      const hier = await cache.match(key, { ignoreSearch: seite });
-      if (hier) return hier;
-      throw new Error("Weder Netz noch Zwischenspeicher");
-    }
+    const hier = await cache.match(key, { ignoreSearch: seite });
+    if (hier) return hier;
+    const response = await fetch(request);
+    if (response.ok) await cache.put(key, response.clone());
+    return response;
   })());
 });
